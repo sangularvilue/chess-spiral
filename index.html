@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chess Spiral</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="title">
+      <h1>Chess Spiral</h1>
+      <p class="sub">Iterative piece placement on the Ulam-style spiral</p>
+    </div>
+    <div class="header-actions">
+      <span id="status" class="status"></span>
+    </div>
+  </header>
+
+  <main>
+    <aside class="config-panel">
+      <section>
+        <h2>Color</h2>
+        <p class="hint">Pick the active color, then click pieces below to add them in this color.</p>
+        <div id="color-palette" class="color-palette"></div>
+      </section>
+
+      <section>
+        <h2>Piece Library</h2>
+        <p class="hint">Hover for a piece's attack pattern. Click to append to the sequence.</p>
+        <div class="piece-group">
+          <h3>Standard</h3>
+          <div id="piece-buttons-standard" class="piece-buttons"></div>
+        </div>
+        <div class="piece-group">
+          <h3>Compound</h3>
+          <div id="piece-buttons-compound" class="piece-buttons"></div>
+        </div>
+        <div class="piece-group">
+          <h3>Leapers</h3>
+          <div id="piece-buttons-leaper" class="piece-buttons"></div>
+        </div>
+        <div class="piece-group">
+          <h3>Riders</h3>
+          <div id="piece-buttons-rider" class="piece-buttons"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Sequence <span id="sequence-count" class="muted"></span></h2>
+        <ol id="sequence-list" class="sequence-list"></ol>
+        <div class="row">
+          <button id="clear-sequence" class="ghost-btn">Clear</button>
+          <button id="shuffle-sequence" class="ghost-btn">Shuffle</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Run</h2>
+        <label class="field">
+          <span>Total pieces</span>
+          <input type="number" id="total-pieces" value="200" min="1" max="20000">
+        </label>
+        <label class="field">
+          <span>Duration (sec) <em id="duration-val">30</em></span>
+          <input type="range" id="duration" min="1" max="300" value="30" step="1">
+        </label>
+        <label class="field">
+          <span>Rate</span>
+          <select id="rate-type" class="select">
+            <option value="linear">Linear</option>
+            <option value="quadratic">Quadratic (slow → fast)</option>
+            <option value="exponential">Exponential (constant zoom)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Doubling time (sec) <em id="doubling-val">10</em></span>
+          <input type="range" id="doubling-time" min="1" max="120" value="10" step="1">
+          <span class="hint">Used by Exponential rate. Smaller = faster zoom.</span>
+        </label>
+        <label class="field">
+          <span>Display</span>
+          <select id="display-mode" class="select">
+            <option value="pieces">Pieces</option>
+            <option value="fill">Filled squares</option>
+          </select>
+        </label>
+        <label class="field inline">
+          <input type="checkbox" id="show-numbers" checked>
+          <span>Show square numbers</span>
+        </label>
+        <div class="controls">
+          <button id="go-btn" class="primary-btn">▶ Go</button>
+          <button id="pause-btn" class="ghost-btn">⏸ Pause</button>
+          <button id="reset-btn" class="ghost-btn">⟲ Reset</button>
+          <button id="fit-btn" class="ghost-btn">⛶ Fit</button>
+          <button id="export-btn" class="ghost-btn">⤓ PNG</button>
+          <button id="export-video-btn" class="ghost-btn">⤓ Video</button>
+        </div>
+      </section>
+    </aside>
+
+    <section class="board-view">
+      <div class="board-wrapper">
+        <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+      <div class="legend" id="legend"></div>
+    </section>
+  </main>
+
+  <div id="piece-tooltip" class="piece-tooltip" hidden>
+    <svg class="tooltip-board" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="tooltip-name"></div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
