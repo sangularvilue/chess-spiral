@@ -6,43 +6,79 @@
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CELL = 30;
 
-// --- Spiral capacity (compile-time bound, not an artificial cap on rays) ----
-// 65536 squares ~ a 255x255 region. Rays walk until blocker or until they
-// leave this region; this is huge compared to any reasonable placement.
-const MAX_SPIRAL = 65536;
-const MAX_X = 130;
-const LUT_SIDE = 2 * MAX_X + 1;
-const WORD_COUNT = MAX_SPIRAL >>> 5; // 2048
+// --- Spiral capacity (grows on demand) --------------------------------------
+// The spiral starts at this size and doubles whenever placement runs out of
+// free squares. Only the host's memory bounds growth.
+let MAX_SPIRAL = 65536;
+let MAX_X = Math.ceil(Math.sqrt(MAX_SPIRAL) / 2) + 2;
+let LUT_SIDE = 2 * MAX_X + 1;
+let WORD_COUNT = MAX_SPIRAL >>> 5;
 
-// Flat typed arrays for speed.
-const spiralX = new Int16Array(MAX_SPIRAL);
-const spiralY = new Int16Array(MAX_SPIRAL);
-const spiralIndexLUT = new Int32Array(LUT_SIDE * LUT_SIDE); // 0 = not in spiral
+let spiralX = new Int16Array(MAX_SPIRAL);
+let spiralY = new Int16Array(MAX_SPIRAL);
+let spiralIndexLUT = new Int32Array(LUT_SIDE * LUT_SIDE); // 0 = not in spiral
 
-(function precomputeSpiral() {
-  spiralX[0] = 0; spiralY[0] = 0;
-  spiralIndexLUT[MAX_X * LUT_SIDE + MAX_X] = 1;
-  let x = 0, y = 0, count = 1;
-  const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
-  let dirIdx = 0, stepSize = 1;
-  while (count < MAX_SPIRAL) {
-    for (let p = 0; p < 2; p++) {
-      const dx = dirs[dirIdx][0], dy = dirs[dirIdx][1];
-      for (let i = 0; i < stepSize && count < MAX_SPIRAL; i++) {
-        x += dx; y += dy;
-        if (x < -MAX_X || x > MAX_X || y < -MAX_X || y > MAX_X) {
-          // Defensive — shouldn't happen given MAX_X / MAX_SPIRAL relation.
-          count = MAX_SPIRAL; break;
-        }
-        spiralX[count] = x; spiralY[count] = y;
-        spiralIndexLUT[(x + MAX_X) * LUT_SIDE + (y + MAX_X)] = count + 1;
-        count++;
+// Resumable spiral walker — state persists across grows.
+const SPIRAL_DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+const spiralWalker = { x: 0, y: 0, count: 1, dirIdx: 0, p: 0, i: 0, stepSize: 1 };
+spiralX[0] = 0; spiralY[0] = 0;
+spiralIndexLUT[MAX_X * LUT_SIDE + MAX_X] = 1;
+
+function advanceSpiralTo(target) {
+  const sw = spiralWalker;
+  while (sw.count < target) {
+    const dx = SPIRAL_DIRS[sw.dirIdx][0];
+    const dy = SPIRAL_DIRS[sw.dirIdx][1];
+    sw.x += dx; sw.y += dy;
+    const idx = sw.count;
+    spiralX[idx] = sw.x;
+    spiralY[idx] = sw.y;
+    spiralIndexLUT[(sw.x + MAX_X) * LUT_SIDE + (sw.y + MAX_X)] = idx + 1;
+    sw.count++;
+    sw.i++;
+    if (sw.i >= sw.stepSize) {
+      sw.i = 0;
+      sw.dirIdx = (sw.dirIdx + 1) % 4;
+      sw.p++;
+      if (sw.p >= 2) {
+        sw.p = 0;
+        sw.stepSize++;
       }
-      dirIdx = (dirIdx + 1) % 4;
     }
-    stepSize++;
   }
-})();
+}
+advanceSpiralTo(MAX_SPIRAL);
+
+// Doubles the spiral and rebuilds the (x,y) LUT under a new MAX_X.
+// Boards lazy-sync their per-square buffers via _syncIfNeeded on next op.
+// Returns false if the host can't allocate the new buffers.
+function growSpiral() {
+  const newMaxSpiral = MAX_SPIRAL * 2;
+  const newMaxX = Math.ceil(Math.sqrt(newMaxSpiral) / 2) + 2;
+  const newLutSide = 2 * newMaxX + 1;
+  let newSpiralX, newSpiralY, newLUT;
+  try {
+    newSpiralX = new Int16Array(newMaxSpiral);
+    newSpiralY = new Int16Array(newMaxSpiral);
+    newLUT = new Int32Array(newLutSide * newLutSide);
+  } catch (e) {
+    return false;
+  }
+  newSpiralX.set(spiralX);
+  newSpiralY.set(spiralY);
+  for (let i = 0; i < spiralWalker.count; i++) {
+    newLUT[(newSpiralX[i] + newMaxX) * newLutSide + (newSpiralY[i] + newMaxX)] = i + 1;
+  }
+  spiralX = newSpiralX;
+  spiralY = newSpiralY;
+  spiralIndexLUT = newLUT;
+  MAX_X = newMaxX;
+  LUT_SIDE = newLutSide;
+  MAX_SPIRAL = newMaxSpiral;
+  WORD_COUNT = MAX_SPIRAL >>> 5;
+  advanceSpiralTo(MAX_SPIRAL);
+  return true;
+}
 
 function spiralIndexAt(x, y) {
   if (x < -MAX_X || x > MAX_X || y < -MAX_X || y > MAX_X) return 0;
@@ -149,13 +185,56 @@ class Board {
   reset() {
     this.pieces.length = 0;
     this.sliders.length = 0;
-    this.occupied.fill(0);
+    this.occupied = new Uint32Array(WORD_COUNT);
     for (const id of COLOR_IDS) {
-      this.attackCount[id].fill(0);
+      this.attackCount[id] = new Uint16Array(MAX_SPIRAL);
+      this.free[id] = new Uint32Array(WORD_COUNT);
       this.free[id].fill(0xFFFFFFFF);
       this.countByColor[id] = 0;
     }
     this.minX = 0; this.maxX = 0; this.minY = 0; this.maxY = 0;
+  }
+
+  // Grow per-square buffers to match the current MAX_SPIRAL/WORD_COUNT, and
+  // extend any slider rays that previously ran off the (smaller) spiral edge.
+  _syncIfNeeded() {
+    if (this.occupied.length === WORD_COUNT) return;
+    const oldWordCount = this.occupied.length;
+    const newOccupied = new Uint32Array(WORD_COUNT);
+    newOccupied.set(this.occupied);
+    this.occupied = newOccupied;
+    for (const id of COLOR_IDS) {
+      const newAttack = new Uint16Array(MAX_SPIRAL);
+      newAttack.set(this.attackCount[id]);
+      this.attackCount[id] = newAttack;
+      const newFree = new Uint32Array(WORD_COUNT);
+      newFree.set(this.free[id]);
+      for (let w = oldWordCount; w < WORD_COUNT; w++) newFree[w] = 0xFFFFFFFF;
+      this.free[id] = newFree;
+    }
+    const sliders = this.sliders;
+    for (let si = 0; si < sliders.length; si++) {
+      const S = sliders[si];
+      const Srays = S._rays;
+      for (let r = 0; r < Srays.length; r++) {
+        const ray = Srays[r];
+        if (ray.blockerDist !== Infinity) continue;
+        let step = ray.lastDist + 1;
+        while (true) {
+          const tx = S.x + step * ray.dx, ty = S.y + step * ray.dy;
+          const tIdx = spiralIndexAt(tx, ty);
+          if (tIdx === 0) break;
+          this._incrementAttack(tIdx, S.colorId);
+          ray.lastDist = step;
+          const tPos = tIdx - 1;
+          if ((this.occupied[tPos >>> 5] & (1 << (tPos & 31))) !== 0) {
+            ray.blockerDist = step;
+            break;
+          }
+          step++;
+        }
+      }
+    }
   }
 
   hasPieceAt(x, y) {
@@ -206,8 +285,13 @@ class Board {
   }
 
   placeNext(type, colorId) {
-    const targetIdx = this.findFirstFree(colorId);
-    if (targetIdx === 0) return null;
+    this._syncIfNeeded();
+    let targetIdx = this.findFirstFree(colorId);
+    while (targetIdx === 0) {
+      if (!growSpiral()) return null;
+      this._syncIfNeeded();
+      targetIdx = this.findFirstFree(colorId);
+    }
     const pos = targetIdx - 1;
     const x = spiralX[pos], y = spiralY[pos];
     const word = pos >>> 5;
