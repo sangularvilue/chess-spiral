@@ -17,6 +17,7 @@ const stubElement = () => {
     style: {}, children: [], hidden: false,
   };
   el.querySelector = () => stubElement();
+  el.closest = () => stubElement();
   return el;
 };
 

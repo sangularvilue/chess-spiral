@@ -600,18 +600,19 @@ function isDarkColor(hex) {
 }
 
 // ---------------- Placement (rAF, throttled UI) -------------
+// Each rate type uses exactly one timing parameter:
+//   linear / quadratic  → totalDuration (totalPieces placed by t = totalDuration)
+//   exponential         → doublingTime  (totalPieces placed by t = d·log2(N+1))
+// The unused parameter has no effect on this rate type.
 function targetCountAt(elapsedMs) {
-  const T = state.totalDuration * 1000;
   const N = state.totalPieces;
   if (elapsedMs <= 0) return 0;
   if (state.rateType === 'exponential') {
-    // Pieces (and thus bbox area) double every doublingTime seconds.
-    // N(t) = floor(2^(t/d) - 1). Hit totalPieces or totalDuration, whichever first.
-    if (elapsedMs >= T) return N;
     const d = state.doublingTime * 1000;
     const v = Math.pow(2, elapsedMs / d) - 1;
     return Math.min(N, Math.max(0, Math.floor(v)));
   }
+  const T = state.totalDuration * 1000;
   if (elapsedMs >= T) return N;
   if (state.rateType === 'quadratic') {
     const r = elapsedMs / T;
@@ -978,7 +979,18 @@ doublingVal.textContent = state.doublingTime;
 totalPiecesInput.addEventListener('change', () => {
   state.totalPieces = Math.max(1, +totalPiecesInput.value | 0);
 });
-rateSelect.addEventListener('change', () => { state.rateType = rateSelect.value; });
+function applyRateVisibility() {
+  // Hide the timing parameter that the current rate doesn't use.
+  const isExp = state.rateType === 'exponential';
+  const durLabel = durationSlider.closest('label');
+  const dblLabel = doublingSlider.closest('label');
+  if (durLabel) durLabel.style.display = isExp ? 'none' : '';
+  if (dblLabel) dblLabel.style.display = isExp ? '' : 'none';
+}
+rateSelect.addEventListener('change', () => {
+  state.rateType = rateSelect.value;
+  applyRateVisibility();
+});
 displayModeSelect.addEventListener('change', () => { state.displayMode = displayModeSelect.value; applyDisplayMode(); });
 showNumbersCB.addEventListener('change', () => {
   state.showNumbers = showNumbersCB.checked;
@@ -1224,14 +1236,14 @@ async function exportVideo() {
   const placements = precomputeAllPlacements();
   if (placements.length === 0) { setStatus('No pieces could be placed.'); return; }
 
-  // Output duration: linear/quadratic use totalDuration. Exponential uses the
-  // time at which the last piece is placed (capped by totalDuration).
-  const T = state.totalDuration * 1000;
+  // Each rate type owns its timing parameter exclusively.
+  //   linear/quadratic → totalDuration
+  //   exponential      → doublingTime·log2(N+1)
   let totalSimMs;
   if (state.rateType === 'exponential') {
-    totalSimMs = Math.min(T, timeForPiece(placements.length));
+    totalSimMs = timeForPiece(placements.length);
   } else {
-    totalSimMs = T;
+    totalSimMs = state.totalDuration * 1000;
   }
   // Hold final state for 1 second at the end
   const HOLD_MS = 1000;
@@ -1335,6 +1347,7 @@ function init() {
   state.doublingTime = +doublingSlider.value;
   state.rateType = rateSelect.value;
   state.displayMode = displayModeSelect.value;
+  applyRateVisibility();
   renderSequence();
   renderLegend();
   setStatus('Ready. Configure the sequence and press Go.');
