@@ -1114,7 +1114,9 @@ async function prerenderImage(size) {
 
   setStatus('Pre-computing placements…');
   await new Promise(r => setTimeout(r, 0));
-  const placements = precomputeAllPlacements();
+  const placements = await precomputeAllPlacements((n, elapsedMs) => {
+    setStatus(`Pre-computing placements: ${n.toLocaleString()} / ${state.totalPieces.toLocaleString()} (${(elapsedMs/1000).toFixed(1)} s, ${Math.round(n / (elapsedMs/1000)).toLocaleString()}/s)`);
+  });
   if (placements.length === 0) { setStatus('No pieces could be placed.'); return; }
 
   // Final view fits all pieces.
@@ -1504,11 +1506,16 @@ function exportPNG() {
 // stream in manual mode (requestFrame per frame), so output timing always
 // matches configs regardless of how slow rendering is in real-time.
 
-function precomputeAllPlacements() {
+// Yields to the event loop periodically so the UI can repaint while we
+// chew through a large precompute. `onProgress` is called with the
+// running placement count at most ~10 Hz.
+async function precomputeAllPlacements(onProgress) {
   const board = new Board();
   const placements = [];
   let seqIdx = 0;
   const N = state.totalPieces;
+  let lastYield = performance.now();
+  const tStart = lastYield;
   while (placements.length < N) {
     if (state.sequence.length === 0) break;
     const entry = state.sequence[seqIdx];
@@ -1519,7 +1526,17 @@ function precomputeAllPlacements() {
     const p = board.placeNext(entry.pieceType, entry.colorId);
     if (!p) break;
     placements.push(p);
+    // Cheap check (bitmask) -> rare wall-clock check -> yield.
+    if ((placements.length & 1023) === 0) {
+      const now = performance.now();
+      if (now - lastYield > 100) {
+        lastYield = now;
+        if (onProgress) onProgress(placements.length, now - tStart);
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
   }
+  if (onProgress) onProgress(placements.length, performance.now() - tStart);
   return placements;
 }
 
@@ -1699,7 +1716,9 @@ async function exportVideo(sizeOverride) {
 
   setStatus('Pre-computing placements…');
   await new Promise(r => setTimeout(r, 0));
-  const placements = precomputeAllPlacements();
+  const placements = await precomputeAllPlacements((n, elapsedMs) => {
+    setStatus(`Pre-computing placements: ${n.toLocaleString()} / ${state.totalPieces.toLocaleString()} (${(elapsedMs/1000).toFixed(1)} s, ${Math.round(n / (elapsedMs/1000)).toLocaleString()}/s)`);
+  });
   if (placements.length === 0) { setStatus('No pieces could be placed.'); return; }
 
   // Each rate type owns its timing parameter exclusively.
