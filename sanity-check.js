@@ -197,6 +197,9 @@ for (const { name, seq } of sliderSequences) {
 {
   const b = new Board();
   const seq = [['knight','red'], ['knight','white']];
+  // Same optimization the live code applies: only iterate over the colors
+  // actually in play (2) instead of all 10 preset colors.
+  b.setActiveColors(['red', 'white']);
   const tStart = Date.now();
   const checkpoints = [500000, 1000000, 2000000, 3000000, 4000000];
   const N = checkpoints[checkpoints.length - 1];

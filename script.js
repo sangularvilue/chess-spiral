@@ -180,7 +180,30 @@ class Board {
     this.minX = 0; this.maxX = 0; this.minY = 0; this.maxY = 0;
     this.countByColor = {}; // colorId -> int
     this.firstFreeWord = {}; // colorId -> lowest word index that *could* still have a free bit
+    // The set of colors actively in play. Inner loops (occupy + attack-mark)
+    // iterate only this list, so a 2-color knight sim spends 1 iter per
+    // mark instead of 9. Defaults to all colors for safety; sequence-aware
+    // callers narrow it via setActiveColors() before placing.
+    this.activeColors = COLOR_IDS.slice();
     for (const id of COLOR_IDS) { this.countByColor[id] = 0; this.firstFreeWord[id] = 0; }
+  }
+
+  // Restrict per-color bookkeeping to the colors actually used by the run.
+  // Must be called before placeNext if you want the speedup. Safe to call on
+  // a fresh / reset board; calling later requires re-init of any newly-added
+  // color's attack maps (not implemented — reset() the board if colors change).
+  setActiveColors(colorIds) {
+    if (colorIds && colorIds.length > 0) {
+      // De-dup while preserving valid colors.
+      const seen = new Set();
+      const out = [];
+      for (const id of colorIds) {
+        if (!seen.has(id) && this.attackCount[id]) { seen.add(id); out.push(id); }
+      }
+      this.activeColors = out;
+    } else {
+      this.activeColors = COLOR_IDS.slice();
+    }
   }
 
   reset() {
@@ -194,6 +217,7 @@ class Board {
       this.countByColor[id] = 0;
       this.firstFreeWord[id] = 0;
     }
+    this.activeColors = COLOR_IDS.slice();
     this.minX = 0; this.maxX = 0; this.minY = 0; this.maxY = 0;
   }
 
@@ -286,8 +310,9 @@ class Board {
     const pos = targetIdx - 1;
     const word = pos >>> 5;
     const bit = 1 << (pos & 31);
-    for (let ci = 0; ci < COLOR_IDS.length; ci++) {
-      const id = COLOR_IDS[ci];
+    const active = this.activeColors;
+    for (let ci = 0; ci < active.length; ci++) {
+      const id = active[ci];
       if (id === attackerColorId) continue;
       const arr = this.attackCount[id];
       if (arr[pos] === 0) this.free[id][word] &= ~bit;
@@ -300,8 +325,9 @@ class Board {
     const word = pos >>> 5;
     const bit = 1 << (pos & 31);
     const isOccupied = (this.occupied[word] & bit) !== 0;
-    for (let ci = 0; ci < COLOR_IDS.length; ci++) {
-      const id = COLOR_IDS[ci];
+    const active = this.activeColors;
+    for (let ci = 0; ci < active.length; ci++) {
+      const id = active[ci];
       if (id === attackerColorId) continue;
       const arr = this.attackCount[id];
       arr[pos]--;
@@ -331,8 +357,9 @@ class Board {
 
     // Occupy.
     this.occupied[word] |= bit;
-    for (let ci = 0; ci < COLOR_IDS.length; ci++) {
-      this.free[COLOR_IDS[ci]][word] &= ~bit;
+    const active = this.activeColors;
+    for (let ci = 0; ci < active.length; ci++) {
+      this.free[active[ci]][word] &= ~bit;
     }
 
     // bbox.
@@ -763,6 +790,11 @@ function startPlacement() {
   if (state.sequence.length === 0) { setStatus('Add at least one piece to the sequence.'); return; }
   if (state.board.pieces.length >= state.totalPieces) {
     setStatus('Total already reached. Reset or raise the total.'); return;
+  }
+  // Lock in the active color set so attack-mark loops only iterate colors
+  // actually used. Only safe on a fresh board.
+  if (state.board.pieces.length === 0) {
+    state.board.setActiveColors([...new Set(state.sequence.map(e => e.colorId))]);
   }
   setInteractive(false);
   state.running = true;
@@ -1523,6 +1555,8 @@ function exportPNG() {
 // running placement count at most ~10 Hz.
 async function precomputeAllPlacements(onProgress) {
   const board = new Board();
+  // Restrict per-color bookkeeping to colors actually present in the sequence.
+  board.setActiveColors([...new Set(state.sequence.map(e => e.colorId))]);
   const placements = [];
   let seqIdx = 0;
   const N = state.totalPieces;
