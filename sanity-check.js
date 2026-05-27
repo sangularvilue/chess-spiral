@@ -193,6 +193,27 @@ for (const { name, seq } of sliderSequences) {
   console.log(`Grow test: ${b.pieces.length} knights in ${dt}ms, reached ring ${lastRing}, ${violations} violations`);
 }
 
+// --- Big speed test: knights at scale, to check linear time growth ---------
+{
+  const b = new Board();
+  const seq = [['knight','red'], ['knight','white']];
+  const tStart = Date.now();
+  const checkpoints = [500000, 1000000, 2000000, 3000000, 4000000];
+  const N = checkpoints[checkpoints.length - 1];
+  let nextCp = 0;
+  for (let i = 0; i < N; i++) {
+    const [type, colorId] = seq[i % seq.length];
+    const p = b.placeNext(type, colorId);
+    if (!p) break;
+    if (b.pieces.length === checkpoints[nextCp]) {
+      const dt = (Date.now() - tStart) / 1000;
+      console.log(`Big test: ${b.pieces.length.toLocaleString()} knights at ${dt.toFixed(1)}s (avg ${(dt*1e6 / b.pieces.length).toFixed(2)} µs/piece)`);
+      nextCp++;
+      if (nextCp >= checkpoints.length) break;
+    }
+  }
+}
+
 // --- Speed test: 2000 pieces -----------------------------------------------
 const speedBoard = new Board();
 const t1 = Date.now();

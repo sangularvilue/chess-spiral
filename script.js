@@ -179,7 +179,8 @@ class Board {
     }
     this.minX = 0; this.maxX = 0; this.minY = 0; this.maxY = 0;
     this.countByColor = {}; // colorId -> int
-    for (const id of COLOR_IDS) this.countByColor[id] = 0;
+    this.firstFreeWord = {}; // colorId -> lowest word index that *could* still have a free bit
+    for (const id of COLOR_IDS) { this.countByColor[id] = 0; this.firstFreeWord[id] = 0; }
   }
 
   reset() {
@@ -191,6 +192,7 @@ class Board {
       this.free[id] = new Uint32Array(WORD_COUNT);
       this.free[id].fill(0xFFFFFFFF);
       this.countByColor[id] = 0;
+      this.firstFreeWord[id] = 0;
     }
     this.minX = 0; this.maxX = 0; this.minY = 0; this.maxY = 0;
   }
@@ -264,15 +266,20 @@ class Board {
 
   findFirstFree(colorId) {
     const bs = this.free[colorId];
-    for (let w = 0; w < WORD_COUNT; w++) {
-      const word = bs[w];
-      if (word !== 0) {
-        const lowBit = word & -word;
-        const bitPos = 31 - Math.clz32(lowBit);
-        return w * 32 + bitPos + 1; // 1-indexed
-      }
-    }
-    return 0;
+    // Skip any leading all-zero words and advance the cursor permanently.
+    // For piece types whose attacks never disappear (knights, leapers, kings,
+    // pawns…), the cursor only ever moves forward, turning what used to be
+    // an O(WORD_COUNT) scan per placement into amortized O(1).
+    // For sliders, _decrementAttack snaps the cursor back when a previously
+    // attacked low-index square becomes free again.
+    let w = this.firstFreeWord[colorId];
+    while (w < WORD_COUNT && bs[w] === 0) w++;
+    this.firstFreeWord[colorId] = w;
+    if (w >= WORD_COUNT) return 0;
+    const word = bs[w];
+    const lowBit = word & -word;
+    const bitPos = 31 - Math.clz32(lowBit);
+    return w * 32 + bitPos + 1; // 1-indexed
   }
 
   _incrementAttack(targetIdx, attackerColorId) {
@@ -298,7 +305,12 @@ class Board {
       if (id === attackerColorId) continue;
       const arr = this.attackCount[id];
       arr[pos]--;
-      if (arr[pos] === 0 && !isOccupied) this.free[id][word] |= bit;
+      if (arr[pos] === 0 && !isOccupied) {
+        this.free[id][word] |= bit;
+        // A square we may have already scanned past became free again — pull
+        // the cursor back so the next findFirstFree sees it.
+        if (word < this.firstFreeWord[id]) this.firstFreeWord[id] = word;
+      }
     }
   }
 
