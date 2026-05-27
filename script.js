@@ -1648,38 +1648,34 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
   const minCellY = Math.floor(-(view.y + view.h) / CELL) - 1;
   const maxCellY = Math.ceil(-view.y / CELL) + 1;
 
-  // Build claim map for this frame (only colored cells need recolor in fill mode)
-  const claim = (state.displayMode === 'fill') ? new Map() : null;
-  if (claim) {
-    for (let i = 0; i < visibleCount; i++) {
-      const p = placements[i];
-      claim.set(p.x + ',' + p.y, p.colorId);
-    }
-  }
-
   // Stroke width: aim for ~1 px at output regardless of zoom (avoids both
   // hairlines at low zoom and screen-door at high zoom).
   const strokeWorld = Math.max(0.05, 1 / sx);
 
   // Cells:
-  //   fill mode → NO strokes anywhere. Cells are pure blocks of color so the
-  //               image keeps its full vibrancy when downscaled (no screen-door).
-  //   pieces mode → all cells get a 1-px grid stroke so the lattice is visible
-  //                 around the glyphs.
-  if (claim) {
-    // Single pass: fill every visible cell with either its claim color or
-    // the default dark, no stroke.
-    for (let x = minCellX; x <= maxCellX; x++) {
-      for (let y = minCellY; y <= maxCellY; y++) {
-        const key = x + ',' + y;
-        const cid = claim.get(key);
-        if (cid) {
-          ctx.fillStyle = COLOR_BY_ID[cid].value;
-        } else {
-          const num = spiralIndexAt(x, y);
-          ctx.fillStyle = (num === 1) ? '#232732' : '#181b22';
-        }
-        ctx.fillRect(x * CELL, -y * CELL - CELL, CELL, CELL);
+  //   fill mode → background covers unclaimed area; we paint claimed cells
+  //               only, grouped by color so fillStyle changes a handful of
+  //               times (not once per piece). No per-cell Map -> works
+  //               beyond V8's 16,777,215-entry Map limit.
+  //   pieces mode → draw all visible cells with a 1-px grid stroke so the
+  //                 lattice is visible around the glyphs.
+  if (state.displayMode === 'fill') {
+    // Bucket by color (max ~10 keys = bucket Map well under any limit).
+    // Filter to visible cell range so off-tile pieces don't pay fillRect.
+    const buckets = Object.create(null);
+    for (let i = 0; i < visibleCount; i++) {
+      const p = placements[i];
+      if (p.x < minCellX || p.x > maxCellX || p.y < minCellY || p.y > maxCellY) continue;
+      const cid = p.colorId;
+      const arr = buckets[cid];
+      if (arr) arr.push(p); else buckets[cid] = [p];
+    }
+    for (const cid in buckets) {
+      ctx.fillStyle = COLOR_BY_ID[cid].value;
+      const arr = buckets[cid];
+      for (let i = 0; i < arr.length; i++) {
+        const p = arr[i];
+        ctx.fillRect(p.x * CELL, -p.y * CELL - CELL, CELL, CELL);
       }
     }
   } else {
