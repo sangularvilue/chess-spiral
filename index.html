@@ -101,6 +101,26 @@
           <button id="export-video-btn" class="ghost-btn">⤓ Video</button>
         </div>
       </section>
+
+      <section>
+        <h2>Pre-render &amp; Download</h2>
+        <p class="hint">Skip live animation. Compute the full sequence and download a file at the chosen size.</p>
+        <label class="field">
+          <span>Format</span>
+          <select id="prerender-format" class="select">
+            <option value="image">Snapshot (PNG)</option>
+            <option value="video">Video (WebM)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Size</span>
+          <select id="prerender-size" class="select"></select>
+        </label>
+        <p class="hint" id="prerender-warn"></p>
+        <div class="controls">
+          <button id="prerender-btn" class="primary-btn">⤓ Render &amp; Download</button>
+        </div>
+      </section>
     </aside>
 
     <section class="board-view">

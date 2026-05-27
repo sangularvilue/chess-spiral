@@ -1037,6 +1037,252 @@ document.getElementById('fit-btn').addEventListener('click', () => setTargetFit(
 document.getElementById('export-btn').addEventListener('click', exportPNG);
 document.getElementById('export-video-btn').addEventListener('click', () => { exportVideo().catch(e => setStatus('Video export failed: ' + e.message)); });
 
+// --- Pre-render & Download ----------------------------------
+// Canvas width/height limit varies (Chrome ~16384, Firefox ~32767). Above
+// SINGLE_CANVAS_LIMIT we fall back to tiled rendering + a custom streaming
+// PNG encoder.
+const SINGLE_CANVAS_LIMIT = 16384;
+const IMAGE_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536];
+const VIDEO_SIZES = [1024, 2048, 4096];
+const prerenderFormatSel = document.getElementById('prerender-format');
+const prerenderSizeSel   = document.getElementById('prerender-size');
+const prerenderWarn      = document.getElementById('prerender-warn');
+
+function populatePrerenderSizes() {
+  const fmt = prerenderFormatSel.value;
+  const sizes = (fmt === 'video') ? VIDEO_SIZES : IMAGE_SIZES;
+  prerenderSizeSel.innerHTML = '';
+  for (const s of sizes) {
+    const opt = document.createElement('option');
+    opt.value = s; opt.textContent = `${s} × ${s}`;
+    prerenderSizeSel.appendChild(opt);
+  }
+  // Default to a sensible middle option (4096 for image, 2048 for video).
+  prerenderSizeSel.value = (fmt === 'video') ? '2048' : '4096';
+  prerenderWarn.textContent = (fmt === 'video')
+    ? '4096² videos can take a minute or more to encode.'
+    : 'Sizes above 16384² use a tiled PNG encoder and may take a while; 65536² can exceed available RAM.';
+}
+prerenderFormatSel.addEventListener('change', populatePrerenderSizes);
+populatePrerenderSizes();
+
+document.getElementById('prerender-btn').addEventListener('click', async () => {
+  const fmt = prerenderFormatSel.value;
+  const size = +prerenderSizeSel.value;
+  try {
+    if (fmt === 'video') {
+      await exportVideo(size);
+    } else {
+      await prerenderImage(size);
+    }
+  } catch (e) {
+    setStatus('Render failed: ' + (e && e.message ? e.message : e));
+  }
+});
+
+async function prerenderImage(size) {
+  if (state.sequence.length === 0) { setStatus('Add at least one piece to the sequence.'); return; }
+
+  setStatus('Pre-computing placements…');
+  await new Promise(r => setTimeout(r, 0));
+  const placements = precomputeAllPlacements();
+  if (placements.length === 0) { setStatus('No pieces could be placed.'); return; }
+
+  // Final view fits all pieces.
+  const finalBox = bboxAtCount(placements, placements.length);
+  const view = fitBoxToCanvas(finalBox, size, size);
+
+  let blob;
+  if (size <= SINGLE_CANVAS_LIMIT) {
+    blob = await renderSingleCanvasPng(size, view, placements);
+  } else {
+    blob = await renderTiledPng(size, view, placements);
+  }
+  if (!blob) return;
+
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `chess-spiral-${size}x${size}.png`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  const mb = (blob.size / (1024 * 1024)).toFixed(1);
+  setStatus(`PNG exported (${size}×${size}, ${mb} MB).`);
+}
+
+async function renderSingleCanvasPng(size, view, placements) {
+  setStatus(`Allocating ${size}×${size} canvas…`);
+  await new Promise(r => setTimeout(r, 0));
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  if (canvas.width !== size || canvas.height !== size) {
+    setStatus(`Browser couldn't allocate ${size}×${size}; got ${canvas.width}×${canvas.height}.`);
+    return null;
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) { setStatus('Could not get 2D context.'); return null; }
+
+  setStatus(`Rendering ${size}×${size}…`);
+  await new Promise(r => setTimeout(r, 0));
+  renderFrameToCanvas(ctx, size, size, view, placements, placements.length);
+
+  setStatus('Encoding PNG…');
+  await new Promise(r => setTimeout(r, 0));
+  return await new Promise(resolve => {
+    canvas.toBlob(b => {
+      if (!b) setStatus('Could not encode PNG (image too large for browser).');
+      resolve(b);
+    }, 'image/png');
+  });
+}
+
+// ---- Tiled PNG encoder (for sizes > SINGLE_CANVAS_LIMIT) ---
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c;
+  }
+  return t;
+})();
+function crc32(...bufs) {
+  let crc = 0xFFFFFFFF;
+  for (const buf of bufs) {
+    for (let i = 0; i < buf.length; i++) crc = CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function u32be(n) {
+  return new Uint8Array([(n>>>24)&0xFF, (n>>>16)&0xFF, (n>>>8)&0xFF, n&0xFF]);
+}
+function pngChunk(type, data) {
+  const typeBytes = new Uint8Array([type.charCodeAt(0), type.charCodeAt(1), type.charCodeAt(2), type.charCodeAt(3)]);
+  const len = u32be(data.length);
+  const crc = u32be(crc32(typeBytes, data));
+  const out = new Uint8Array(8 + data.length + 4);
+  out.set(len, 0); out.set(typeBytes, 4); out.set(data, 8); out.set(crc, 8 + data.length);
+  return out;
+}
+function pngIHDR(width, height) {
+  const buf = new Uint8Array(13);
+  buf.set(u32be(width), 0);
+  buf.set(u32be(height), 4);
+  buf[8] = 8;  // bit depth
+  buf[9] = 2;  // color type RGB
+  buf[10] = 0; buf[11] = 0; buf[12] = 0;
+  return buf;
+}
+
+async function renderTiledPng(size, view, placements) {
+  if (typeof CompressionStream === 'undefined') {
+    setStatus('Browser lacks CompressionStream; cannot do tiled PNG.');
+    return null;
+  }
+  const SIG = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  const STRIP_H = 256;            // scanlines processed per pass
+  const SECTION_W = SINGLE_CANVAS_LIMIT; // horizontal section width
+  const sx = size / view.w;       // global world->pixel scale
+
+  // One reusable canvas per horizontal section.
+  const sectionCanvases = [];
+  let xCursor = 0;
+  while (xCursor < size) {
+    const w = Math.min(SECTION_W, size - xCursor);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = STRIP_H;
+    if (c.width !== w || c.height !== STRIP_H) {
+      setStatus(`Browser couldn't allocate ${w}×${STRIP_H} tile canvas.`);
+      return null;
+    }
+    sectionCanvases.push({ canvas: c, ctx: c.getContext('2d'), xStart: xCursor, w });
+    xCursor += w;
+  }
+
+  // Streaming deflate.
+  const cs = new CompressionStream('deflate');
+  const writer = cs.writable.getWriter();
+  const compressedChunks = [];
+  const readDone = (async () => {
+    const reader = cs.readable.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      compressedChunks.push(value);
+    }
+  })();
+
+  const scanlineBytes = size * 3;
+  // Output scanline buffer (filter byte + RGB bytes).
+  const outLine = new Uint8Array(1 + scanlineBytes);
+
+  const totalStrips = Math.ceil(size / STRIP_H);
+  for (let stripIdx = 0; stripIdx < totalStrips; stripIdx++) {
+    const yStart = stripIdx * STRIP_H;
+    const stripH = Math.min(STRIP_H, size - yStart);
+
+    // Render each section for this strip and pull pixels.
+    const sectionPixels = [];
+    for (const sec of sectionCanvases) {
+      // Resize if last strip is short
+      if (sec.canvas.height !== stripH) {
+        sec.canvas.height = stripH;
+      }
+      // Tile view = sub-rectangle of the global viewBox that this section/strip covers.
+      const tileView = {
+        x: view.x + sec.xStart / sx,
+        y: view.y + yStart / sx,
+        w: sec.w / sx,
+        h: stripH / sx,
+      };
+      renderFrameToCanvas(sec.ctx, sec.w, stripH, tileView, placements, placements.length);
+      sectionPixels.push(sec.ctx.getImageData(0, 0, sec.w, stripH).data);
+    }
+
+    // Filter + write scanlines for this strip.
+    for (let yLocal = 0; yLocal < stripH; yLocal++) {
+      outLine[0] = 0; // filter None
+      let dst = 1;
+      for (let s = 0; s < sectionCanvases.length; s++) {
+        const sec = sectionCanvases[s];
+        const data = sectionPixels[s];
+        const srcStart = yLocal * sec.w * 4;
+        for (let x = 0; x < sec.w; x++) {
+          const i = srcStart + x * 4;
+          outLine[dst++] = data[i];
+          outLine[dst++] = data[i + 1];
+          outLine[dst++] = data[i + 2];
+        }
+      }
+      // .slice() so the stream owns its own copy and we can mutate outLine.
+      await writer.write(outLine.slice());
+    }
+
+    const pct = Math.round(((stripIdx + 1) / totalStrips) * 100);
+    setStatus(`Rendering ${size}×${size}… ${pct}% (strip ${stripIdx + 1}/${totalStrips})`);
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  await writer.close();
+  await readDone;
+
+  // Concatenate compressed bytes for one IDAT chunk.
+  let totalLen = 0;
+  for (const c of compressedChunks) totalLen += c.length;
+  const idatData = new Uint8Array(totalLen);
+  {
+    let off = 0;
+    for (const c of compressedChunks) { idatData.set(c, off); off += c.length; }
+  }
+
+  setStatus('Assembling PNG…');
+  await new Promise(r => setTimeout(r, 0));
+  const ihdr = pngChunk('IHDR', pngIHDR(size, size));
+  const idat = pngChunk('IDAT', idatData);
+  const iend = pngChunk('IEND', new Uint8Array(0));
+  return new Blob([SIG, ihdr, idat, iend], { type: 'image/png' });
+}
+
 // ---------------- Legend ------------------------------------
 const legendEl = document.getElementById('legend');
 function renderLegend() {
@@ -1319,21 +1565,44 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
     }
   }
 
-  // Draw cells
-  ctx.lineWidth = 0.4;
-  ctx.strokeStyle = '#20232b';
-  for (let x = minCellX; x <= maxCellX; x++) {
-    for (let y = minCellY; y <= maxCellY; y++) {
-      const num = spiralIndexAt(x, y);
-      let fill = '#181b22';
-      if (num === 1) fill = '#232732';
-      if (claim) {
-        const c = claim.get(x + ',' + y);
-        if (c) fill = COLOR_BY_ID[c].value;
-      }
-      ctx.fillStyle = fill;
+  // Stroke width: aim for ~1 px at output regardless of zoom (avoids both
+  // hairlines at low zoom and screen-door at high zoom).
+  const strokeWorld = Math.max(0.05, 1 / sx);
+
+  // Cells: in fill mode we draw claimed cells with NO stroke (so blocks of
+  // same color merge cleanly), and unclaimed cells with the grid stroke.
+  // In pieces mode all cells get the grid stroke.
+  if (claim) {
+    // Pass 1: claimed cells, solid fill, no stroke.
+    for (const [key, cid] of claim) {
+      const comma = key.indexOf(',');
+      const x = +key.slice(0, comma);
+      const y = +key.slice(comma + 1);
+      ctx.fillStyle = COLOR_BY_ID[cid].value;
       ctx.fillRect(x * CELL, -y * CELL - CELL, CELL, CELL);
-      ctx.strokeRect(x * CELL, -y * CELL - CELL, CELL, CELL);
+    }
+    // Pass 2: unclaimed cells, default fill + stroke.
+    ctx.lineWidth = strokeWorld;
+    ctx.strokeStyle = '#20232b';
+    for (let x = minCellX; x <= maxCellX; x++) {
+      for (let y = minCellY; y <= maxCellY; y++) {
+        if (claim.has(x + ',' + y)) continue;
+        const num = spiralIndexAt(x, y);
+        ctx.fillStyle = (num === 1) ? '#232732' : '#181b22';
+        ctx.fillRect(x * CELL, -y * CELL - CELL, CELL, CELL);
+        ctx.strokeRect(x * CELL, -y * CELL - CELL, CELL, CELL);
+      }
+    }
+  } else {
+    ctx.lineWidth = strokeWorld;
+    ctx.strokeStyle = '#20232b';
+    for (let x = minCellX; x <= maxCellX; x++) {
+      for (let y = minCellY; y <= maxCellY; y++) {
+        const num = spiralIndexAt(x, y);
+        ctx.fillStyle = (num === 1) ? '#232732' : '#181b22';
+        ctx.fillRect(x * CELL, -y * CELL - CELL, CELL, CELL);
+        ctx.strokeRect(x * CELL, -y * CELL - CELL, CELL, CELL);
+      }
     }
   }
 
@@ -1371,7 +1640,7 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
   ctx.restore();
 }
 
-async function exportVideo() {
+async function exportVideo(sizeOverride) {
   if (typeof MediaRecorder === 'undefined') { setStatus('Video export not supported in this browser.'); return; }
   if (state.sequence.length === 0) { setStatus('Add at least one piece to the sequence.'); return; }
 
@@ -1394,9 +1663,14 @@ async function exportVideo() {
   const FPS = 30;
   const totalFrames = Math.ceil((totalSimMs + HOLD_MS) / 1000 * FPS);
 
-  const VIDEO_W = 1280, VIDEO_H = 720;
+  // Square at sizeOverride, or default to 1280x720 if not supplied.
+  const VIDEO_W = sizeOverride || 1280;
+  const VIDEO_H = sizeOverride || 720;
   const canvas = document.createElement('canvas');
   canvas.width = VIDEO_W; canvas.height = VIDEO_H;
+  if (canvas.width !== VIDEO_W || canvas.height !== VIDEO_H) {
+    setStatus(`Browser couldn't allocate ${VIDEO_W}×${VIDEO_H} canvas.`); return;
+  }
   const ctx = canvas.getContext('2d');
 
   // Initial paint so the stream has a frame
@@ -1422,7 +1696,9 @@ async function exportVideo() {
   if (!mimeType) { setStatus('No supported video codec.'); return; }
 
   const chunks = [];
-  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 });
+  // Scale bitrate with pixel count so 4K doesn't compress to mush.
+  const bitrate = Math.max(6_000_000, Math.round(VIDEO_W * VIDEO_H * 1.5));
+  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
   recorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
   const stopped = new Promise(res => { recorder.onstop = res; });
   recorder.start();
@@ -1467,7 +1743,7 @@ async function exportVideo() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'chess-spiral.webm';
+  a.download = `chess-spiral-${VIDEO_W}x${VIDEO_H}.webm`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
   const mb = (blob.size / (1024 * 1024)).toFixed(1);
