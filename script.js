@@ -1435,7 +1435,7 @@ function exportPNG() {
   clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
   let css = EXPORT_STYLE;
   if (svgEl.classList.contains('hide-numbers')) css += '\n.cell-num { display: none; }';
-  if (svgEl.classList.contains('mode-fill')) css += '\n.piece-glyph { display: none; }';
+  if (svgEl.classList.contains('mode-fill')) css += '\n.piece-glyph { display: none; }\n.cell { stroke: none; }';
   const styleNode = document.createElementNS(SVG_NS, 'style');
   styleNode.textContent = css;
   clone.insertBefore(styleNode, clone.firstChild);
@@ -1569,28 +1569,25 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
   // hairlines at low zoom and screen-door at high zoom).
   const strokeWorld = Math.max(0.05, 1 / sx);
 
-  // Cells: in fill mode we draw claimed cells with NO stroke (so blocks of
-  // same color merge cleanly), and unclaimed cells with the grid stroke.
-  // In pieces mode all cells get the grid stroke.
+  // Cells:
+  //   fill mode → NO strokes anywhere. Cells are pure blocks of color so the
+  //               image keeps its full vibrancy when downscaled (no screen-door).
+  //   pieces mode → all cells get a 1-px grid stroke so the lattice is visible
+  //                 around the glyphs.
   if (claim) {
-    // Pass 1: claimed cells, solid fill, no stroke.
-    for (const [key, cid] of claim) {
-      const comma = key.indexOf(',');
-      const x = +key.slice(0, comma);
-      const y = +key.slice(comma + 1);
-      ctx.fillStyle = COLOR_BY_ID[cid].value;
-      ctx.fillRect(x * CELL, -y * CELL - CELL, CELL, CELL);
-    }
-    // Pass 2: unclaimed cells, default fill + stroke.
-    ctx.lineWidth = strokeWorld;
-    ctx.strokeStyle = '#20232b';
+    // Single pass: fill every visible cell with either its claim color or
+    // the default dark, no stroke.
     for (let x = minCellX; x <= maxCellX; x++) {
       for (let y = minCellY; y <= maxCellY; y++) {
-        if (claim.has(x + ',' + y)) continue;
-        const num = spiralIndexAt(x, y);
-        ctx.fillStyle = (num === 1) ? '#232732' : '#181b22';
+        const key = x + ',' + y;
+        const cid = claim.get(key);
+        if (cid) {
+          ctx.fillStyle = COLOR_BY_ID[cid].value;
+        } else {
+          const num = spiralIndexAt(x, y);
+          ctx.fillStyle = (num === 1) ? '#232732' : '#181b22';
+        }
         ctx.fillRect(x * CELL, -y * CELL - CELL, CELL, CELL);
-        ctx.strokeRect(x * CELL, -y * CELL - CELL, CELL, CELL);
       }
     }
   } else {

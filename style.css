@@ -386,6 +386,9 @@ button { font: inherit; cursor: pointer; }
 
 #board.mode-fill .piece-glyph { display: none; }
 #board.mode-fill .cell-num { fill: rgba(0,0,0,0.5); }
+/* Fill mode: no cell strokes so adjacent same-color blocks merge cleanly
+   and the image keeps full vibrancy when zoomed out. */
+#board.mode-fill .cell { stroke: none; }
 
 .piece-just-placed { animation: pop .3s cubic-bezier(.34,1.56,.64,1); transform-origin: center; transform-box: fill-box; }
 @keyframes pop {
