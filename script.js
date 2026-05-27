@@ -164,6 +164,66 @@ const PRESET_COLORS = [
 const COLOR_BY_ID = Object.fromEntries(PRESET_COLORS.map(c => [c.id, c]));
 const COLOR_IDS = PRESET_COLORS.map(c => c.id);
 
+// ---------------- Slider line-index helpers ----------------
+// Two rays in opposite directions ((1,2) and (-1,-2)) lie on the same line.
+// We canonicalize each direction so opposite rays share a single "line family"
+// key, then a slider's line through (sx, sy) in that family is determined by
+// the invariant   c = cdy·sx − cdx·sy.
+function canonicalDir(dx, dy) {
+  return (dx > 0 || (dx === 0 && dy > 0)) ? [dx, dy] : [-dx, -dy];
+}
+
+// PIECE_FAMILIES[type] = array of { cdx, cdy, fwdIdx, bwdIdx } —
+// one per canonical line family for that piece type. fwdIdx and bwdIdx are
+// indices into PIECES[type].rays for the forward (matches canonical) and
+// backward (opposite of canonical) rays on that line. Either may be -1 if
+// the piece only has one direction on that line family (none of our current
+// piece types do, but keep it general).
+const PIECE_FAMILIES = {};
+for (const type in PIECES) {
+  const rays = PIECES[type].rays;
+  const byKey = new Map();
+  for (let i = 0; i < rays.length; i++) {
+    const dx = rays[i][0], dy = rays[i][1];
+    const cd = canonicalDir(dx, dy);
+    const key = cd[0] + ',' + cd[1];
+    let entry = byKey.get(key);
+    if (!entry) { entry = { cdx: cd[0], cdy: cd[1], fwdIdx: -1, bwdIdx: -1, fwdDx: cd[0], fwdDy: cd[1], bwdDx: -cd[0], bwdDy: -cd[1] }; byKey.set(key, entry); }
+    if (dx === cd[0] && dy === cd[1]) entry.fwdIdx = i;
+    else entry.bwdIdx = i;
+  }
+  PIECE_FAMILIES[type] = Array.from(byKey.values());
+}
+
+// Union of canonical directions across all piece types. The blocker check
+// only needs to look up these families.
+const ALL_CANONICAL_DIRS = (() => {
+  const seen = new Set();
+  const out = [];
+  for (const type in PIECE_FAMILIES) {
+    for (const fam of PIECE_FAMILIES[type]) {
+      const key = fam.cdx + ',' + fam.cdy;
+      if (!seen.has(key)) { seen.add(key); out.push([fam.cdx, fam.cdy]); }
+    }
+  }
+  return out;
+})();
+// Stable index per canonical direction so we can address lineIndex[] by int.
+const DIR_INDEX = (() => {
+  const m = new Map();
+  for (let i = 0; i < ALL_CANONICAL_DIRS.length; i++) {
+    m.set(ALL_CANONICAL_DIRS[i][0] + ',' + ALL_CANONICAL_DIRS[i][1], i);
+  }
+  return m;
+})();
+// Patch dirIdx into each piece family entry so per-slider indexing is just
+// an array access at insert time.
+for (const type in PIECE_FAMILIES) {
+  for (const fam of PIECE_FAMILIES[type]) {
+    fam.dirIdx = DIR_INDEX.get(fam.cdx + ',' + fam.cdy);
+  }
+}
+
 // ---------------- Board (bitset / incremental) --------------
 class Board {
   constructor() {
@@ -185,6 +245,12 @@ class Board {
     // mark instead of 9. Defaults to all colors for safety; sequence-aware
     // callers narrow it via setActiveColors() before placing.
     this.activeColors = COLOR_IDS.slice();
+    // Spatial index: one Map per canonical direction, keyed by the integer
+    // line constant c = cdy·x − cdx·x. Values are arrays of slider entries.
+    // (Per-direction Maps avoid the per-lookup string concat that a single
+    // Map keyed by "cdx,cdy,c" would need.)
+    this.lineIndex = [];
+    for (let di = 0; di < ALL_CANONICAL_DIRS.length; di++) this.lineIndex.push(new Map());
     for (const id of COLOR_IDS) { this.countByColor[id] = 0; this.firstFreeWord[id] = 0; }
   }
 
@@ -218,6 +284,8 @@ class Board {
       this.firstFreeWord[id] = 0;
     }
     this.activeColors = COLOR_IDS.slice();
+    this.lineIndex = [];
+    for (let di = 0; di < ALL_CANONICAL_DIRS.length; di++) this.lineIndex.push(new Map());
     this.minX = 0; this.maxX = 0; this.minY = 0; this.maxY = 0;
   }
 
@@ -370,23 +438,49 @@ class Board {
       if (y < this.minY) this.minY = y; else if (y > this.maxY) this.maxY = y;
     }
 
-    // Re-block existing sliders that pass through (x,y).
-    const sliders = this.sliders;
-    for (let si = 0; si < sliders.length; si++) {
-      const S = sliders[si];
-      const Srays = S._rays;
-      for (let r = 0; r < Srays.length; r++) {
-        const ray = Srays[r];
-        if (ray.blockerDist === 0) continue;
-        const k = onRay(S.x, S.y, ray.dx, ray.dy, x, y);
-        if (k === null || k >= ray.blockerDist) continue;
-        // New closer blocker — decrement attacks for k+1 .. lastDist.
-        for (let step = k + 1; step <= ray.lastDist; step++) {
-          const sIdx = spiralIndexAt(S.x + step * ray.dx, S.y + step * ray.dy);
-          if (sIdx !== 0) this._decrementAttack(sIdx, S.colorId);
+    // Re-block existing sliders that pass through (x,y). Only iterate the
+    // sliders whose ray line actually goes through the new piece — looked
+    // up by the (canonical direction, line constant) index. This is the
+    // critical optimisation that turns a per-placement O(num_sliders) scan
+    // into O(per_line_count).
+    for (let di = 0; di < ALL_CANONICAL_DIRS.length; di++) {
+      const cdx = ALL_CANONICAL_DIRS[di][0];
+      const cdy = ALL_CANONICAL_DIRS[di][1];
+      const c = cdy * x - cdx * y;
+      const bucket = this.lineIndex[di].get(c);
+      if (!bucket) continue;
+      const cdxNonZero = cdx !== 0;
+      for (let ei = 0; ei < bucket.length; ei++) {
+        const entry = bucket[ei];
+        const S = entry.slider;
+        // P and S are guaranteed to be on the same line in this family, so
+        // the signed step k is just (Δx / cdx) (or (Δy / cdy) when cdx=0).
+        const k = cdxNonZero ? (x - S.x) / cdx : (y - S.y) / cdy;
+        if (k === 0) continue;
+        if (k > 0) {
+          if (entry.fwdIdx < 0) continue;
+          const ray = S._rays[entry.fwdIdx];
+          if (ray.blockerDist <= k) continue;
+          const rdx = entry.fwdDx, rdy = entry.fwdDy;
+          for (let step = k + 1; step <= ray.lastDist; step++) {
+            const sIdx = spiralIndexAt(S.x + step * rdx, S.y + step * rdy);
+            if (sIdx !== 0) this._decrementAttack(sIdx, S.colorId);
+          }
+          ray.blockerDist = k;
+          ray.lastDist = k;
+        } else {
+          if (entry.bwdIdx < 0) continue;
+          const dist = -k;
+          const ray = S._rays[entry.bwdIdx];
+          if (ray.blockerDist <= dist) continue;
+          const rdx = entry.bwdDx, rdy = entry.bwdDy;
+          for (let step = dist + 1; step <= ray.lastDist; step++) {
+            const sIdx = spiralIndexAt(S.x + step * rdx, S.y + step * rdy);
+            if (sIdx !== 0) this._decrementAttack(sIdx, S.colorId);
+          }
+          ray.blockerDist = dist;
+          ray.lastDist = dist;
         }
-        ray.blockerDist = k;
-        ray.lastDist = k;
       }
     }
 
@@ -427,6 +521,17 @@ class Board {
       }
       piece._rays = pieceRays;
       this.sliders.push(piece);
+      // Index this slider into every canonical line family it has rays on, so
+      // future blocker checks find it via O(1) line lookup, not O(N) scan.
+      const families = PIECE_FAMILIES[type];
+      for (let fi = 0; fi < families.length; fi++) {
+        const fam = families[fi];
+        const c = fam.cdy * x - fam.cdx * y;
+        const subMap = this.lineIndex[fam.dirIdx];
+        let bucket = subMap.get(c);
+        if (!bucket) { bucket = []; subMap.set(c, bucket); }
+        bucket.push({ slider: piece, fwdIdx: fam.fwdIdx, bwdIdx: fam.bwdIdx, fwdDx: fam.fwdDx, fwdDy: fam.fwdDy, bwdDx: fam.bwdDx, bwdDy: fam.bwdDy });
+      }
     }
 
     this.pieces.push(piece);

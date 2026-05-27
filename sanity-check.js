@@ -193,6 +193,28 @@ for (const { name, seq } of sliderSequences) {
   console.log(`Grow test: ${b.pieces.length} knights in ${dt}ms, reached ring ${lastRing}, ${violations} violations`);
 }
 
+// --- Slider speed test: nightriders at scale ------------------------------
+{
+  const b = new Board();
+  b.setActiveColors(['red', 'white']);
+  const seq = [['nightrider','red'], ['nightrider','white']];
+  const tStart = Date.now();
+  const checkpoints = [50000, 200000, 500000, 1000000];
+  const N = checkpoints[checkpoints.length - 1];
+  let nextCp = 0;
+  for (let i = 0; i < N; i++) {
+    const [type, colorId] = seq[i % seq.length];
+    const p = b.placeNext(type, colorId);
+    if (!p) break;
+    if (b.pieces.length === checkpoints[nextCp]) {
+      const dt = (Date.now() - tStart) / 1000;
+      console.log(`Nightrider test: ${b.pieces.length.toLocaleString()} pieces at ${dt.toFixed(1)}s (avg ${(dt*1e6 / b.pieces.length).toFixed(2)} µs/piece)`);
+      nextCp++;
+      if (nextCp >= checkpoints.length) break;
+    }
+  }
+}
+
 // --- Big speed test: knights at scale, to check linear time growth ---------
 {
   const b = new Board();
