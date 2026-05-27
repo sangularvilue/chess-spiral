@@ -1637,9 +1637,36 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
   ctx.restore();
 }
 
+// Cache the dynamically-imported muxer between runs.
+let _muxerLib = null;
+async function loadMuxer() {
+  if (_muxerLib) return _muxerLib;
+  // CDN ESM build. Cached by browser after first load.
+  _muxerLib = await import('https://cdn.jsdelivr.net/npm/webm-muxer@5/+esm');
+  return _muxerLib;
+}
+
+// Pure WebCodecs path: every frame carries an explicit timestamp, so the
+// output video plays at the configured simulation speed regardless of how
+// long rendering / encoding actually takes. (MediaRecorder timestamps frames
+// by wall-clock arrival, which is why slow renders produced multi-hour
+// videos for fast simulations.)
 async function exportVideo(sizeOverride) {
-  if (typeof MediaRecorder === 'undefined') { setStatus('Video export not supported in this browser.'); return; }
   if (state.sequence.length === 0) { setStatus('Add at least one piece to the sequence.'); return; }
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    setStatus('Browser lacks WebCodecs; cannot export video.'); return;
+  }
+
+  setStatus('Loading muxer…');
+  await new Promise(r => setTimeout(r, 0));
+  let Muxer, ArrayBufferTarget;
+  try {
+    const mod = await loadMuxer();
+    Muxer = mod.Muxer; ArrayBufferTarget = mod.ArrayBufferTarget;
+    if (!Muxer || !ArrayBufferTarget) throw new Error('Bad muxer module');
+  } catch (e) {
+    setStatus('Could not load webm-muxer (need network access).'); return;
+  }
 
   setStatus('Pre-computing placements…');
   await new Promise(r => setTimeout(r, 0));
@@ -1655,12 +1682,10 @@ async function exportVideo(sizeOverride) {
   } else {
     totalSimMs = state.totalDuration * 1000;
   }
-  // Hold final state for 1 second at the end
   const HOLD_MS = 1000;
   const FPS = 30;
   const totalFrames = Math.ceil((totalSimMs + HOLD_MS) / 1000 * FPS);
 
-  // Square at sizeOverride, or default to 1280x720 if not supplied.
   const VIDEO_W = sizeOverride || 1280;
   const VIDEO_H = sizeOverride || 720;
   const canvas = document.createElement('canvas');
@@ -1669,82 +1694,98 @@ async function exportVideo(sizeOverride) {
     setStatus(`Browser couldn't allocate ${VIDEO_W}×${VIDEO_H} canvas.`); return;
   }
   const ctx = canvas.getContext('2d');
+  if (!ctx) { setStatus('Could not get 2D context.'); return; }
 
-  // Initial paint so the stream has a frame
   ctx.fillStyle = '#0b0c10';
   ctx.fillRect(0, 0, VIDEO_W, VIDEO_H);
 
-  // Manual capture stream
-  const stream = canvas.captureStream(0);
-  const track = stream.getVideoTracks()[0];
-  if (!track || !track.requestFrame) {
-    setStatus('Browser lacks CanvasCaptureMediaStreamTrack.requestFrame; cannot export video.');
-    return;
-  }
-
-  // Pick a working mime type
-  const candidates = [
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
-  let mimeType = '';
-  for (const c of candidates) { if (MediaRecorder.isTypeSupported(c)) { mimeType = c; break; } }
-  if (!mimeType) { setStatus('No supported video codec.'); return; }
-
-  const chunks = [];
-  // Scale bitrate with pixel count so 4K doesn't compress to mush.
+  // Pick a supported encoder config (prefer VP9; fall back to VP8).
   const bitrate = Math.max(6_000_000, Math.round(VIDEO_W * VIDEO_H * 1.5));
-  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
-  recorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-  const stopped = new Promise(res => { recorder.onstop = res; });
-  recorder.start();
+  const codecTriesVp9 = ['vp09.00.10.08', 'vp09.00.31.08'];
+  const codecTriesVp8 = ['vp8'];
+  let chosen = null;
+  for (const c of codecTriesVp9.concat(codecTriesVp8)) {
+    try {
+      const sup = await VideoEncoder.isConfigSupported({
+        codec: c, width: VIDEO_W, height: VIDEO_H, bitrate, framerate: FPS,
+      });
+      if (sup.supported) { chosen = { codec: c, config: sup.config }; break; }
+    } catch (_) { /* try next */ }
+  }
+  if (!chosen) { setStatus('No supported VP8/VP9 encoder config for this size.'); return; }
 
-  // Tight starting view (matches live behavior)
+  const target = new ArrayBufferTarget();
+  const muxerCodec = chosen.codec.startsWith('vp09') ? 'V_VP9' : 'V_VP8';
+  const muxer = new Muxer({
+    target,
+    video: { codec: muxerCodec, width: VIDEO_W, height: VIDEO_H, frameRate: FPS },
+    type: 'webm',
+  });
+
+  let encoderError = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: e => { encoderError = e; console.error('VideoEncoder error:', e); },
+  });
+  encoder.configure(chosen.config);
+
   const initialBox = bboxAtCount(placements, 0);
   const initialView = fitBoxToCanvas(initialBox, VIDEO_W, VIDEO_H);
   const smoothed = makeSmoothedView(initialView);
 
+  const FRAME_DUR_US = Math.round(1_000_000 / FPS);
   let visibleCount = 0;
-  // Precompute placement times for monotonic walk
+
   for (let frame = 0; frame < totalFrames; frame++) {
+    if (encoderError) throw encoderError;
+
     const frameMs = (frame / FPS) * 1000;
     const simMs = Math.min(frameMs, totalSimMs);
 
-    // Advance visibleCount
     while (visibleCount < placements.length && timeForPiece(visibleCount + 1) <= simMs) {
       visibleCount++;
     }
 
-    // Smoothly approach the auto-fit target (same lerp factor as live UI)
     const box = bboxAtCount(placements, visibleCount);
     const targetView = fitBoxToCanvas(box, VIDEO_W, VIDEO_H);
     advanceSmoothedView(smoothed, targetView, 0.1);
-
     renderFrameToCanvas(ctx, VIDEO_W, VIDEO_H, smoothed.cur, placements, visibleCount);
-    track.requestFrame();
-    // Yield to event loop so MediaRecorder can pick up the frame
-    await new Promise(r => setTimeout(r, 0));
 
-    if ((frame & 31) === 0) {
+    const videoFrame = new VideoFrame(canvas, {
+      timestamp: frame * FRAME_DUR_US,
+      duration: FRAME_DUR_US,
+    });
+    // Force a keyframe every ~2 seconds for seekability.
+    encoder.encode(videoFrame, { keyFrame: frame % (FPS * 2) === 0 });
+    videoFrame.close();
+
+    // Back off if the encoder's queue is getting deep, so we don't OOM.
+    while (encoder.encodeQueueSize > 16) {
+      await new Promise(r => setTimeout(r, 0));
+    }
+
+    if ((frame & 15) === 0) {
       const pct = Math.round((frame / totalFrames) * 100);
-      setStatus(`Encoding video: ${pct}% (frame ${frame}/${totalFrames})`);
+      setStatus(`Encoding: ${pct}% (frame ${frame}/${totalFrames}, output ${(totalFrames/FPS).toFixed(1)}s)`);
+      await new Promise(r => setTimeout(r, 0));
     }
   }
 
-  recorder.stop();
-  await stopped;
-  track.stop();
+  setStatus('Finalizing video…');
+  await encoder.flush();
+  encoder.close();
+  muxer.finalize();
 
-  const blob = new Blob(chunks, { type: 'video/webm' });
-  const url = URL.createObjectURL(blob);
+  if (encoderError) throw encoderError;
+
+  const blob = new Blob([target.buffer], { type: 'video/webm' });
   const a = document.createElement('a');
-  a.href = url;
+  a.href = URL.createObjectURL(blob);
   a.download = `chess-spiral-${VIDEO_W}x${VIDEO_H}.webm`;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   const mb = (blob.size / (1024 * 1024)).toFixed(1);
-  setStatus(`Video exported (${mb} MB, ${(totalFrames / FPS).toFixed(1)}s).`);
+  setStatus(`Video exported (${VIDEO_W}×${VIDEO_H}, ${mb} MB, ${(totalFrames/FPS).toFixed(1)}s).`);
 }
 
 // ---------------- Bootstrap ---------------------------------
