@@ -628,12 +628,39 @@ function isDarkColor(hex) {
 //   linear / quadratic  → totalDuration (totalPieces placed by t = totalDuration)
 //   exponential         → doublingTime  (totalPieces placed by t = d·log2(N+1))
 // The unused parameter has no effect on this rate type.
+//
+// Exponential mode also caps the gap between consecutive placements at
+// MAX_GAP_MS so a slow doubling time (e.g. 10 s) doesn't produce a tediously
+// long pause before piece 1 appears. The cap is applied as a single early
+// "linear" phase that ends as soon as natural exponential gaps drop below
+// MAX_GAP_MS; from there the curve resumes its true 2^(t/d) rate, shifted
+// to start at the breakeven point.
+const MAX_GAP_MS = 1500;
+
+// For exponential mode, find the smallest piece index `m` whose natural gap
+// from piece m-1 is already ≤ MAX_GAP_MS. Pieces 1..m get capped (placed at
+// MAX_GAP_MS intervals); pieces m+1.. use the true exponential rate.
+function expPhaseBoundary(d) {
+  // Natural gap for piece n: d * log2((n+1)/n). It's ≤ MAX_GAP_MS when
+  // (n+1)/n ≤ 2^(MAX_GAP_MS/d) ≡ r, i.e. n ≥ 1/(r-1).
+  const r = Math.pow(2, MAX_GAP_MS / d);
+  if (r <= 1) return 0; // shouldn't happen but be defensive
+  return Math.floor(1 / (r - 1));
+}
+
 function targetCountAt(elapsedMs) {
   const N = state.totalPieces;
   if (elapsedMs <= 0) return 0;
   if (state.rateType === 'exponential') {
     const d = state.doublingTime * 1000;
-    const v = Math.pow(2, elapsedMs / d) - 1;
+    const m = expPhaseBoundary(d);
+    const tSwitch = m * MAX_GAP_MS;
+    if (elapsedMs <= tSwitch) {
+      return Math.min(N, Math.max(0, Math.floor(elapsedMs / MAX_GAP_MS)));
+    }
+    // After the linear cap-phase, resume exponential anchored at piece m.
+    const tAfter = elapsedMs - tSwitch;
+    const v = Math.pow(2, tAfter / d) * (m + 1) - 1;
     return Math.min(N, Math.max(0, Math.floor(v)));
   }
   const T = state.totalDuration * 1000;
@@ -651,7 +678,9 @@ function timeForPiece(n) {
   const N = state.totalPieces;
   if (state.rateType === 'exponential') {
     const d = state.doublingTime * 1000;
-    return d * Math.log2(n + 1);
+    const m = expPhaseBoundary(d);
+    if (n <= m) return n * MAX_GAP_MS;
+    return m * MAX_GAP_MS + d * (Math.log2(n + 1) - Math.log2(m + 1));
   }
   if (state.rateType === 'quadratic') {
     return T * Math.sqrt(n / N);
