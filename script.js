@@ -235,6 +235,24 @@ class Board {
         }
       }
     }
+
+    // Retry leaper attacks that previously fell off-spiral. Now that the spiral
+    // has grown, some of those target squares are reachable and must be marked
+    // — otherwise an enemy can land in a square the piece truly attacks.
+    const all = this.pieces;
+    for (let i = 0; i < all.length; i++) {
+      const p = all[i];
+      if (!p._pendingLeapers || p._pendingLeapers.length === 0) continue;
+      const leapers = PIECES[p.type].leapers;
+      const still = [];
+      for (let j = 0; j < p._pendingLeapers.length; j++) {
+        const li = p._pendingLeapers[j];
+        const tIdx = spiralIndexAt(p.x + leapers[li][0], p.y + leapers[li][1]);
+        if (tIdx !== 0) this._incrementAttack(tIdx, p.colorId);
+        else still.push(li);
+      }
+      p._pendingLeapers = still.length > 0 ? still : null;
+    }
   }
 
   hasPieceAt(x, y) {
@@ -338,7 +356,13 @@ class Board {
     const leapers = def.leapers;
     for (let i = 0; i < leapers.length; i++) {
       const tIdx = spiralIndexAt(x + leapers[i][0], y + leapers[i][1]);
-      if (tIdx !== 0) this._incrementAttack(tIdx, colorId);
+      if (tIdx !== 0) {
+        this._incrementAttack(tIdx, colorId);
+      } else {
+        // Off-spiral right now; remember so we can mark it after a growSpiral().
+        if (!piece._pendingLeapers) piece._pendingLeapers = [];
+        piece._pendingLeapers.push(i);
+      }
     }
 
     const rays = def.rays;

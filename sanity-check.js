@@ -122,6 +122,77 @@ console.log(`\nFast placed ${fastBoard.pieces.length} pieces in ${dt}ms (~${(dt/
 console.log(`Bbox: x in [${fastBoard.minX}, ${fastBoard.maxX}], y in [${fastBoard.minY}, ${fastBoard.maxY}]`);
 console.log(`Mismatches vs reference: ${mismatches}`);
 
+// --- Self-consistency: at high N, verify every placed piece sits on a
+//     square that is NOT attacked by any enemy piece. Catches algo bugs even
+//     when the reference is too slow to run.
+function verifyConsistency(board) {
+  const pieces = board.pieces;
+  const occ = new Set(pieces.map(p => p.x + ',' + p.y));
+  let violations = 0;
+  for (const target of pieces) {
+    for (const attacker of pieces) {
+      if (attacker.colorId === target.colorId) continue;
+      if (refAttacks(attacker, target.x, target.y, occ)) {
+        // Piece at (target.x, target.y) is attacked by an enemy. That's a violation:
+        // when target was placed, no enemy should have attacked that square.
+        // (Newer enemies arriving later don't matter — they wouldn't be placed
+        // there if target's square was occupied, but they CAN attack it from elsewhere.)
+        // For the algorithm to be correct, NO target should be attacked by any
+        // currently-existing enemy whose placement was BEFORE target.
+        // We need to check insertion order: was attacker placed before target?
+        // pieces[] is in placement order, so we can compare indices.
+        const ti = pieces.indexOf(target);
+        const ai = pieces.indexOf(attacker);
+        if (ai < ti) {
+          violations++;
+          if (violations <= 5) {
+            console.log(`VIOLATION: piece #${ti+1} ${target.colorId} ${target.type} at (${target.x},${target.y}) is attacked by earlier piece #${ai+1} ${attacker.colorId} ${attacker.type} at (${attacker.x},${attacker.y})`);
+          }
+        }
+      }
+    }
+  }
+  return violations;
+}
+
+// Run sequences that include sliders heavily, see if any violation emerges.
+const sliderSequences = [
+  { name: 'two rooks',    seq: [['rook','red'], ['rook','blue']] },
+  { name: 'two queens',   seq: [['queen','red'], ['queen','blue']] },
+  { name: 'rook+bishop',  seq: [['rook','red'], ['bishop','blue']] },
+  { name: 'two knights',  seq: [['knight','red'], ['knight','white']] },
+  { name: 'all standard', seq: [['pawn','red'],['knight','red'],['bishop','red'],['rook','red'],['queen','red'],['king','red'],['pawn','blue'],['knight','blue'],['bishop','blue'],['rook','blue'],['queen','blue'],['king','blue']] },
+];
+for (const { name, seq } of sliderSequences) {
+  const b = new Board();
+  for (let i = 0; i < 1500; i++) {
+    const [t, c] = seq[i % seq.length];
+    if (!b.placeNext(t, c)) break;
+  }
+  const v = verifyConsistency(b);
+  console.log(`Self-check "${name}": ${b.pieces.length} pieces, ${v} violations`);
+}
+
+// --- Grow-the-spiral test: place enough knights to force at least one
+//     growSpiral() and verify no violations across the boundary.
+{
+  const b = new Board();
+  const seq = [['knight','red'], ['knight','blue']];
+  const TARGET = 70000;
+  const t = Date.now();
+  let lastRing = 0;
+  for (let i = 0; i < TARGET; i++) {
+    const [type, colorId] = seq[i % seq.length];
+    const p = b.placeNext(type, colorId);
+    if (!p) break;
+    const r = Math.max(Math.abs(p.x), Math.abs(p.y));
+    if (r > lastRing) lastRing = r;
+  }
+  const dt = Date.now() - t;
+  const violations = verifyConsistency(b);
+  console.log(`Grow test: ${b.pieces.length} knights in ${dt}ms, reached ring ${lastRing}, ${violations} violations`);
+}
+
 // --- Speed test: 2000 pieces -----------------------------------------------
 const speedBoard = new Board();
 const t1 = Date.now();
