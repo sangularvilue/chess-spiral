@@ -447,3 +447,99 @@ button { font: inherit; cursor: pointer; }
   fill: #e4e6eb;
   font-weight: 700;
 }
+
+/* Live stats panel (overlays the board) */
+.stats-panel {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 280px;
+  background: rgba(11, 12, 16, 0.88);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  z-index: 5;
+  overflow: hidden;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-size: 12px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+}
+.stats-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px 6px 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border-bottom: 1px solid var(--border);
+}
+.stats-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.stats-toggle {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  font-family: inherit;
+}
+.stats-toggle:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.stats-body {
+  padding: 10px 12px 12px;
+}
+.stats-panel.collapsed .stats-body {
+  display: none;
+}
+.stats-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.big-stat {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.big-stat-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.stats-sub {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.ring-chart {
+  display: block;
+  width: 100%;
+  height: 110px;
+  background: #0f1117;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+.chart-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text-faint);
+}

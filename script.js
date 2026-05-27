@@ -681,6 +681,7 @@ function placementTick() {
       state.lastUIUpdate = now;
       renderSequence();
       renderLegend();
+      renderStatsPanel();
       setStatus(`#${state.board.pieces.length}/${state.totalPieces} · ${(elapsed/1000).toFixed(1)}s`);
     }
   }
@@ -719,6 +720,7 @@ function stopPlacement() {
   state.pausedAt = performance.now();
   renderSequence();
   renderLegend();
+  renderStatsPanel();
 }
 
 function onPlacementComplete(aborted) {
@@ -735,6 +737,7 @@ function onPlacementComplete(aborted) {
   setInteractive(true);
   renderSequence();
   renderLegend();
+  renderStatsPanel();
 }
 
 function resetAll() {
@@ -751,6 +754,7 @@ function resetAll() {
   setInteractive(false);
   renderSequence();
   renderLegend();
+  renderStatsPanel();
 }
 
 // ---------------- Pan / zoom --------------------------------
@@ -1028,6 +1032,122 @@ function renderLegend() {
     legendEl.appendChild(stat);
   }
 }
+
+// ---------------- Stats panel (live) ------------------------
+const statsPanelEl   = document.getElementById('stats-panel');
+const unfilledPctEl  = document.getElementById('unfilled-pct');
+const unfilledSubEl  = document.getElementById('unfilled-sub');
+const ringMaxEl      = document.getElementById('ring-max');
+const ringChartCanvas = document.getElementById('ring-chart');
+let ringChartCtx = null;
+let ringChartCssW = 0, ringChartCssH = 0;
+
+function ensureRingChartSize() {
+  const cssW = ringChartCanvas.clientWidth;
+  const cssH = ringChartCanvas.clientHeight;
+  if (cssW === ringChartCssW && cssH === ringChartCssH && ringChartCtx) return;
+  const dpr = window.devicePixelRatio || 1;
+  ringChartCanvas.width = Math.max(1, Math.round(cssW * dpr));
+  ringChartCanvas.height = Math.max(1, Math.round(cssH * dpr));
+  ringChartCtx = ringChartCanvas.getContext('2d');
+  ringChartCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ringChartCssW = cssW;
+  ringChartCssH = cssH;
+}
+
+// Per-piece ring is max(|x|,|y|). Recomputed from board.pieces on render
+// (cheap: O(N), called at most ~10 Hz).
+function ringSize(r) { return r === 0 ? 1 : 8 * r; }
+
+function computeRingCounts() {
+  const counts = [];
+  let maxRing = 0;
+  const pieces = state.board.pieces;
+  for (let i = 0; i < pieces.length; i++) {
+    const p = pieces[i];
+    const r = Math.max(Math.abs(p.x), Math.abs(p.y));
+    counts[r] = (counts[r] || 0) + 1;
+    if (r > maxRing) maxRing = r;
+  }
+  // fill 0s
+  for (let r = 0; r <= maxRing; r++) if (!counts[r]) counts[r] = 0;
+  return { counts, maxRing };
+}
+
+function drawRingChart(counts, maxRing) {
+  ensureRingChartSize();
+  const ctx = ringChartCtx;
+  const W = ringChartCssW;
+  const H = ringChartCssH;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0f1117';
+  ctx.fillRect(0, 0, W, H);
+
+  const padL = 22, padR = 6, padT = 6, padB = 14;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+
+  // axes
+  ctx.strokeStyle = '#262a33';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL + 0.5, padT);
+  ctx.lineTo(padL + 0.5, padT + chartH);
+  ctx.lineTo(padL + chartW, padT + chartH + 0.5);
+  ctx.stroke();
+
+  // 50% guide line
+  ctx.strokeStyle = '#1b1e26';
+  ctx.beginPath();
+  ctx.moveTo(padL, padT + chartH / 2 + 0.5);
+  ctx.lineTo(padL + chartW, padT + chartH / 2 + 0.5);
+  ctx.stroke();
+
+  // bars
+  const numRings = maxRing + 1;
+  const barSlot = chartW / numRings;
+  const barW = Math.max(1, barSlot - 1);
+  ctx.fillStyle = '#6b8eff';
+  for (let r = 0; r <= maxRing; r++) {
+    const occ = counts[r] || 0;
+    const total = ringSize(r);
+    const pctUnfilled = 1 - (occ / total);
+    const barH = pctUnfilled * chartH;
+    const x = padL + r * barSlot;
+    const y = padT + chartH - barH;
+    ctx.fillRect(x, y, barW, barH);
+  }
+
+  // y-axis labels
+  ctx.fillStyle = '#5e6371';
+  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.fillText('100%', padL - 3, padT - 2);
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('0%', padL - 3, padT + chartH + 1);
+}
+
+function renderStatsPanel() {
+  const { counts, maxRing } = computeRingCounts();
+  const totalSquares = (2 * maxRing + 1) * (2 * maxRing + 1);
+  const occupied = state.board.pieces.length;
+  const pct = totalSquares > 0 ? (1 - occupied / totalSquares) * 100 : 100;
+  unfilledPctEl.textContent = pct.toFixed(1) + '%';
+  unfilledSubEl.textContent = `${occupied}/${totalSquares}`;
+  ringMaxEl.textContent = 'ring ' + maxRing;
+  if (!statsPanelEl.classList.contains('collapsed')) {
+    drawRingChart(counts, maxRing);
+  }
+}
+
+document.getElementById('stats-toggle').addEventListener('click', () => {
+  const collapsed = statsPanelEl.classList.toggle('collapsed');
+  document.getElementById('stats-toggle').textContent = collapsed ? '+' : '−';
+  document.getElementById('stats-toggle').title = collapsed ? 'Expand' : 'Minimize';
+  if (!collapsed) renderStatsPanel();
+});
 
 // ---------------- PNG export --------------------------------
 const EXPORT_STYLE = `
@@ -1337,10 +1457,8 @@ function init() {
   renderColors();
   buildPieceButtons();
   state.sequence = [
-    { pieceType: 'queen',  colorId: 'white' },
     { pieceType: 'knight', colorId: 'red' },
-    { pieceType: 'bishop', colorId: 'blue' },
-    { pieceType: 'rook',   colorId: 'green' },
+    { pieceType: 'knight', colorId: 'white' },
   ];
   state.totalPieces = +totalPiecesInput.value;
   state.totalDuration = +durationSlider.value;
@@ -1350,6 +1468,7 @@ function init() {
   applyRateVisibility();
   renderSequence();
   renderLegend();
+  renderStatsPanel();
   setStatus('Ready. Configure the sequence and press Go.');
 }
 init();

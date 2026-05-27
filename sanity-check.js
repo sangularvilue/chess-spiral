@@ -18,6 +18,15 @@ const stubElement = () => {
   };
   el.querySelector = () => stubElement();
   el.closest = () => stubElement();
+  el.getContext = () => ({
+    setTransform: () => {}, clearRect: () => {}, fillRect: () => {},
+    strokeRect: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {},
+    stroke: () => {}, fillText: () => {}, save: () => {}, restore: () => {},
+    scale: () => {}, translate: () => {}, drawImage: () => {},
+    fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: '', textBaseline: '',
+  });
+  el.clientWidth = 280;
+  el.clientHeight = 120;
   return el;
 };
 

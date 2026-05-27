@@ -106,6 +106,24 @@
     <section class="board-view">
       <div class="board-wrapper">
         <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div id="stats-panel" class="stats-panel">
+          <div class="stats-header">
+            <span class="stats-title">Filling</span>
+            <button class="stats-toggle" id="stats-toggle" title="Minimize" aria-label="Minimize">−</button>
+          </div>
+          <div class="stats-body" id="stats-body">
+            <div class="stats-headline">
+              <span class="big-stat" id="unfilled-pct">100%</span>
+              <span class="big-stat-label">unfilled</span>
+              <span class="stats-sub" id="unfilled-sub"></span>
+            </div>
+            <canvas id="ring-chart" class="ring-chart"></canvas>
+            <div class="chart-axis">
+              <span>ring 0</span>
+              <span id="ring-max">—</span>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="legend" id="legend"></div>
     </section>
