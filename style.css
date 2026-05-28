@@ -379,7 +379,8 @@ button { font: inherit; cursor: pointer; }
   pointer-events: none;
 }
 
-#board.hide-numbers .cell-num { display: none; }
+#board.hide-numbers .cell-num,
+#board.auto-hide-numbers .cell-num { display: none; }
 
 .piece-glyph {
   text-anchor: middle;

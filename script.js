@@ -971,6 +971,12 @@ function ensureCellCoverage(minX, maxX, minY, maxY) {
   renderedBounds = { minX: nMinX, maxX: nMaxX, minY: nMinY, maxY: nMaxY };
 }
 
+// Past this many pieces we skip rendering cell-index labels — they're
+// effectively unreadable anyway at the resulting zoom level and creating
+// (or rasterizing) millions of tiny <text> nodes / fillText calls is the
+// single slowest step in both live SVG painting and PNG export.
+const NUMBERS_MAX_PIECES = 10000;
+
 function drawCell(x, y) {
   const num = spiralIndexAt(x, y);
   const key = x + ',' + y;
@@ -987,7 +993,7 @@ function drawCell(x, y) {
     // Inline style overrides the .cell CSS rule (presentation attribute does not).
     rect.style.fill = COLOR_BY_ID[claimColor].value;
   }
-  if (num !== 0) {
+  if (num !== 0 && state.board.pieces.length <= NUMBERS_MAX_PIECES) {
     const t = document.createElementNS(SVG_NS, 'text');
     t.setAttribute('x', x * CELL + CELL - 2);
     t.setAttribute('y', -y * CELL - CELL + 1.5);
@@ -1904,6 +1910,10 @@ function renderStatsPanel() {
   unfilledPctEl.textContent = pct.toFixed(1) + '%';
   unfilledSubEl.textContent = `${occupied}/${totalSquares}`;
   ringMaxEl.textContent = 'ring ' + maxRing;
+  // Auto-hide existing cell-number labels once the board grows past the
+  // readability threshold. New cells past this point don't get text nodes
+  // (see drawCell), and this class hides any that were drawn earlier.
+  if (svgEl) svgEl.classList.toggle('auto-hide-numbers', occupied > NUMBERS_MAX_PIECES);
   if (!statsPanelEl.classList.contains('collapsed')) {
     drawRingChart(counts, maxRing);
   }
@@ -1931,7 +1941,7 @@ function exportPNG() {
   clone.setAttribute('xmlns', SVG_NS);
   clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
   let css = EXPORT_STYLE;
-  if (svgEl.classList.contains('hide-numbers')) css += '\n.cell-num { display: none; }';
+  if (svgEl.classList.contains('hide-numbers') || state.board.pieces.length > NUMBERS_MAX_PIECES) css += '\n.cell-num { display: none; }';
   if (svgEl.classList.contains('mode-fill')) css += '\n.piece-glyph { display: none; }\n.cell { stroke: none; }';
   const styleNode = document.createElementNS(SVG_NS, 'style');
   styleNode.textContent = css;
@@ -2147,8 +2157,10 @@ async function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visi
     }
   }
 
-  // Numbers
-  if (state.showNumbers) {
+  // Numbers — skipped above NUMBERS_MAX_PIECES since they're unreadable at
+  // the resulting zoom level AND the per-cell fillText loop is the slowest
+  // step in the canvas render for large simulations.
+  if (state.showNumbers && placements.length <= NUMBERS_MAX_PIECES) {
     ctx.fillStyle = '#4a4f5c';
     ctx.font = '5px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
