@@ -10,7 +10,15 @@ const CELL = 30;
 // The spiral starts at this size and doubles whenever placement runs out of
 // free squares. Only the host's memory bounds growth.
 let MAX_SPIRAL = 65536;
-let MAX_X = Math.ceil(Math.sqrt(MAX_SPIRAL) / 2) + 2;
+// LUT must hold whichever spiral type uses more area for the same N:
+//   - Ulam (square rings):  max |coord| ≈ √N / 2
+//   - Diamond (Manhattan):  max |coord| ≈ √(N/2)
+// Diamond is bigger, so we size for it always — the choice of spiral type can
+// change at runtime and we don't want to reallocate the LUT every time.
+function maxCoordFor(spiralSize) {
+  return Math.ceil(Math.sqrt(spiralSize / 2)) + 2;
+}
+let MAX_X = maxCoordFor(MAX_SPIRAL);
 let LUT_SIDE = 2 * MAX_X + 1;
 let WORD_COUNT = MAX_SPIRAL >>> 5;
 
@@ -18,17 +26,27 @@ let spiralX = new Int16Array(MAX_SPIRAL);
 let spiralY = new Int16Array(MAX_SPIRAL);
 let spiralIndexLUT = new Int32Array(LUT_SIDE * LUT_SIDE); // 0 = not in spiral
 
-// Resumable spiral walker — state persists across grows.
-const SPIRAL_DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
-const spiralWalker = { x: 0, y: 0, count: 1, dirIdx: 0, p: 0, i: 0, stepSize: 1 };
+// --- Two spiral generators, each with its own resumable walker state.
+//
+// Ulam (square) spiral: 1 right, 1 up, 2 left, 2 down, 3 right, … — directions
+// cycle through right/up/left/down with step counts 1,1,2,2,3,3,4,4,…
+//
+// Diamond (taxicab) spiral: cells visited in increasing |x|+|y|. Each ring r
+// has 4r cells. Path enters ring r by going N from (r-1, 0) to (r-1, 1), then
+// NW for r-1 steps, SW for r, SE for r, NE for r, finishing at (r, 0).
+let spiralType = 'ulam';
+
+const ULAM_DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+const ulamWalker     = { x: 0, y: 0, count: 1, dirIdx: 0, p: 0, i: 0, stepSize: 1 };
+const diamondWalker  = { x: 0, y: 0, count: 1, ring: 1, phase: 0, stepsInPhase: 0 };
 spiralX[0] = 0; spiralY[0] = 0;
 spiralIndexLUT[MAX_X * LUT_SIDE + MAX_X] = 1;
 
-function advanceSpiralTo(target) {
-  const sw = spiralWalker;
+function advanceUlamTo(target) {
+  const sw = ulamWalker;
   while (sw.count < target) {
-    const dx = SPIRAL_DIRS[sw.dirIdx][0];
-    const dy = SPIRAL_DIRS[sw.dirIdx][1];
+    const dx = ULAM_DIRS[sw.dirIdx][0];
+    const dy = ULAM_DIRS[sw.dirIdx][1];
     sw.x += dx; sw.y += dy;
     const idx = sw.count;
     spiralX[idx] = sw.x;
@@ -47,6 +65,58 @@ function advanceSpiralTo(target) {
     }
   }
 }
+
+function advanceDiamondTo(target) {
+  const w = diamondWalker;
+  while (w.count < target) {
+    // Skip over any phase that has 0 remaining steps in the current ring
+    // (only phase 1 / NW on ring 1).
+    while (true) {
+      let phaseLimit;
+      if (w.phase === 0) phaseLimit = 1;            // N entry step
+      else if (w.phase === 1) phaseLimit = w.ring - 1; // NW
+      else phaseLimit = w.ring;                      // SW / SE / NE
+      if (w.stepsInPhase < phaseLimit) break;
+      w.stepsInPhase = 0;
+      w.phase++;
+      if (w.phase >= 5) { w.phase = 0; w.ring++; }
+    }
+    if      (w.phase === 0) { w.y += 1; }
+    else if (w.phase === 1) { w.x -= 1; w.y += 1; }
+    else if (w.phase === 2) { w.x -= 1; w.y -= 1; }
+    else if (w.phase === 3) { w.x += 1; w.y -= 1; }
+    else                    { w.x += 1; w.y += 1; }
+    const idx = w.count;
+    spiralX[idx] = w.x;
+    spiralY[idx] = w.y;
+    spiralIndexLUT[(w.x + MAX_X) * LUT_SIDE + (w.y + MAX_X)] = idx + 1;
+    w.count++;
+    w.stepsInPhase++;
+  }
+}
+
+function advanceSpiralTo(target) {
+  if (spiralType === 'ulam') advanceUlamTo(target);
+  else                       advanceDiamondTo(target);
+}
+
+function activeWalkerCount() {
+  return spiralType === 'ulam' ? ulamWalker.count : diamondWalker.count;
+}
+
+// Reset both walkers and the LUT; regenerate from scratch.
+// Called when the user switches spiral type (or as part of a full reset).
+function resetSpiral() {
+  ulamWalker.x = 0; ulamWalker.y = 0; ulamWalker.count = 1;
+  ulamWalker.dirIdx = 0; ulamWalker.p = 0; ulamWalker.i = 0; ulamWalker.stepSize = 1;
+  diamondWalker.x = 0; diamondWalker.y = 0; diamondWalker.count = 1;
+  diamondWalker.ring = 1; diamondWalker.phase = 0; diamondWalker.stepsInPhase = 0;
+  spiralIndexLUT.fill(0);
+  spiralX[0] = 0; spiralY[0] = 0;
+  spiralIndexLUT[MAX_X * LUT_SIDE + MAX_X] = 1;
+  advanceSpiralTo(MAX_SPIRAL);
+}
+
 advanceSpiralTo(MAX_SPIRAL);
 
 // Doubles the spiral and rebuilds the (x,y) LUT under a new MAX_X.
@@ -54,7 +124,7 @@ advanceSpiralTo(MAX_SPIRAL);
 // Returns false if the host can't allocate the new buffers.
 function growSpiral() {
   const newMaxSpiral = MAX_SPIRAL * 2;
-  const newMaxX = Math.ceil(Math.sqrt(newMaxSpiral) / 2) + 2;
+  const newMaxX = maxCoordFor(newMaxSpiral);
   const newLutSide = 2 * newMaxX + 1;
   let newSpiralX, newSpiralY, newLUT;
   try {
@@ -66,7 +136,8 @@ function growSpiral() {
   }
   newSpiralX.set(spiralX);
   newSpiralY.set(spiralY);
-  for (let i = 0; i < spiralWalker.count; i++) {
+  const currentCount = activeWalkerCount();
+  for (let i = 0; i < currentCount; i++) {
     newLUT[(newSpiralX[i] + newMaxX) * newLutSide + (newSpiralY[i] + newMaxX)] = i + 1;
   }
   spiralX = newSpiralX;
@@ -1169,6 +1240,7 @@ const doublingSlider = document.getElementById('doubling-time');
 const doublingVal = document.getElementById('doubling-val');
 const totalPiecesInput = document.getElementById('total-pieces');
 const rateSelect = document.getElementById('rate-type');
+const spiralSelect = document.getElementById('spiral-type');
 const displayModeSelect = document.getElementById('display-mode');
 const showNumbersCB = document.getElementById('show-numbers');
 
@@ -1196,6 +1268,13 @@ function applyRateVisibility() {
 rateSelect.addEventListener('change', () => {
   state.rateType = rateSelect.value;
   applyRateVisibility();
+});
+spiralSelect.addEventListener('change', () => {
+  spiralType = spiralSelect.value;
+  // Cell #N is at a different (x,y) under each spiral type, so any existing
+  // placements would be meaningless after a switch — reset everything.
+  resetSpiral();
+  resetAll();
 });
 displayModeSelect.addEventListener('change', () => { state.displayMode = displayModeSelect.value; applyDisplayMode(); });
 showNumbersCB.addEventListener('change', () => {
@@ -1505,9 +1584,24 @@ function ensureRingChartSize() {
   ringChartCssH = cssH;
 }
 
-// Per-piece ring is max(|x|,|y|). Recomputed from board.pieces on render
-// (cheap: O(N), called at most ~10 Hz).
-function ringSize(r) { return r === 0 ? 1 : 8 * r; }
+// Per-piece ring metric depends on the active spiral type:
+//   - Ulam:    Chebyshev distance, ring r has 8r cells (8r+1 for r=0)
+//   - Diamond: Manhattan distance, ring r has 4r cells (1 for r=0)
+function ringOf(x, y) {
+  return spiralType === 'diamond'
+    ? Math.abs(x) + Math.abs(y)
+    : Math.max(Math.abs(x), Math.abs(y));
+}
+function ringSize(r) {
+  if (r === 0) return 1;
+  return spiralType === 'diamond' ? 4 * r : 8 * r;
+}
+function totalCellsThroughRing(r) {
+  if (r <= 0) return 1;
+  return spiralType === 'diamond'
+    ? 2 * r * r + 2 * r + 1
+    : (2 * r + 1) * (2 * r + 1);
+}
 
 function computeRingCounts() {
   const counts = [];
@@ -1515,7 +1609,7 @@ function computeRingCounts() {
   const pieces = state.board.pieces;
   for (let i = 0; i < pieces.length; i++) {
     const p = pieces[i];
-    const r = Math.max(Math.abs(p.x), Math.abs(p.y));
+    const r = ringOf(p.x, p.y);
     counts[r] = (counts[r] || 0) + 1;
     if (r > maxRing) maxRing = r;
   }
@@ -1581,7 +1675,7 @@ function drawRingChart(counts, maxRing) {
 
 function renderStatsPanel() {
   const { counts, maxRing } = computeRingCounts();
-  const totalSquares = (2 * maxRing + 1) * (2 * maxRing + 1);
+  const totalSquares = totalCellsThroughRing(maxRing);
   const occupied = state.board.pieces.length;
   const pct = totalSquares > 0 ? (1 - occupied / totalSquares) * 100 : 100;
   unfilledPctEl.textContent = pct.toFixed(1) + '%';
@@ -1998,6 +2092,10 @@ function init() {
   state.doublingTime = +doublingSlider.value;
   state.rateType = rateSelect.value;
   state.displayMode = displayModeSelect.value;
+  if (spiralSelect.value !== spiralType) {
+    spiralType = spiralSelect.value;
+    resetSpiral();
+  }
   applyRateVisibility();
   renderSequence();
   renderLegend();

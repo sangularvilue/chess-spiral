@@ -69,6 +69,14 @@
           <input type="range" id="duration" min="1" max="300" value="30" step="1">
         </label>
         <label class="field">
+          <span>Spiral</span>
+          <select id="spiral-type" class="select">
+            <option value="ulam">Ulam (square rings)</option>
+            <option value="diamond">Diamond (Manhattan rings)</option>
+          </select>
+          <span class="hint">Changing this resets the board.</span>
+        </label>
+        <label class="field">
           <span>Rate</span>
           <select id="rate-type" class="select">
             <option value="linear">Linear</option>
