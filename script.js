@@ -1381,11 +1381,14 @@ async function renderSingleCanvasPng(size, view, placements) {
   const ctx = canvas.getContext('2d');
   if (!ctx) { setStatus('Could not get 2D context.'); return null; }
 
-  setStatus(`Rendering ${size}×${size}…`);
-  await new Promise(r => setTimeout(r, 0));
-  renderFrameToCanvas(ctx, size, size, view, placements, placements.length);
+  await renderFrameToCanvas(ctx, size, size, view, placements, placements.length, {
+    onProgress: (frac, label) => {
+      const pct = Math.round(frac * 100);
+      setStatus(`Rendering ${size}×${size}: ${pct}%${label ? ' — ' + label : ''}`);
+    },
+  });
 
-  setStatus('Encoding PNG…');
+  setStatus(`Encoding PNG (${size}×${size}, may take 10–60s for large sizes)…`);
   await new Promise(r => setTimeout(r, 0));
   return await new Promise(resolve => {
     canvas.toBlob(b => {
@@ -1829,7 +1832,13 @@ function advanceSmoothedView(view, target, lerp) {
   }
 }
 
-function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCount) {
+async function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCount, opts) {
+  // opts.onProgress(frac, label?): called periodically with frac ∈ [0,1].
+  // When onProgress is supplied we yield to the event loop ~10×/sec so the
+  // browser can repaint the status bar. Video export doesn't pass it and
+  // runs straight through (no yields, no extra microtask hops).
+  const onProgress = opts && opts.onProgress;
+
   // Background
   ctx.fillStyle = '#0b0c10';
   ctx.fillRect(0, 0, canvasW, canvasH);
@@ -1851,16 +1860,13 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
   // hairlines at low zoom and screen-door at high zoom).
   const strokeWorld = Math.max(0.05, 1 / sx);
 
-  // Cells:
-  //   fill mode → background covers unclaimed area; we paint claimed cells
-  //               only, grouped by color so fillStyle changes a handful of
-  //               times (not once per piece). No per-cell Map -> works
-  //               beyond V8's 16,777,215-entry Map limit.
-  //   pieces mode → draw all visible cells with a 1-px grid stroke so the
-  //                 lattice is visible around the glyphs.
+  // Only yield when onProgress is provided. For video / tile paths that don't
+  // pass it, NO await executes anywhere in this function — the body completes
+  // synchronously and the caller can read the canvas immediately, even without
+  // awaiting the returned Promise.
+  let lastYield = onProgress ? performance.now() : 0;
+
   if (state.displayMode === 'fill') {
-    // Bucket by color (max ~10 keys = bucket Map well under any limit).
-    // Filter to visible cell range so off-tile pieces don't pay fillRect.
     const buckets = Object.create(null);
     for (let i = 0; i < visibleCount; i++) {
       const p = placements[i];
@@ -1868,24 +1874,55 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
       const cid = p.colorId;
       const arr = buckets[cid];
       if (arr) arr.push(p); else buckets[cid] = [p];
+      if (onProgress && (i & 65535) === 0) {
+        const now = performance.now();
+        if (now - lastYield > 100) {
+          lastYield = now;
+          onProgress(0.4 * i / Math.max(1, visibleCount), 'bucketing');
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
     }
+    let total = 0;
+    for (const cid in buckets) total += buckets[cid].length;
+    let drawn = 0;
     for (const cid in buckets) {
       ctx.fillStyle = COLOR_BY_ID[cid].value;
       const arr = buckets[cid];
       for (let i = 0; i < arr.length; i++) {
         const p = arr[i];
         ctx.fillRect(p.x * CELL, -p.y * CELL - CELL, CELL, CELL);
+        drawn++;
+        if (onProgress && (drawn & 65535) === 0) {
+          const now = performance.now();
+          if (now - lastYield > 100) {
+            lastYield = now;
+            onProgress(0.4 + 0.6 * drawn / Math.max(1, total), 'drawing cells');
+            await new Promise(r => setTimeout(r, 0));
+          }
+        }
       }
     }
   } else {
     ctx.lineWidth = strokeWorld;
     ctx.strokeStyle = '#20232b';
+    const totalCells = Math.max(1, (maxCellX - minCellX + 1) * (maxCellY - minCellY + 1));
+    let done = 0;
     for (let x = minCellX; x <= maxCellX; x++) {
       for (let y = minCellY; y <= maxCellY; y++) {
         const num = spiralIndexAt(x, y);
         ctx.fillStyle = (num === 1) ? '#232732' : '#181b22';
         ctx.fillRect(x * CELL, -y * CELL - CELL, CELL, CELL);
         ctx.strokeRect(x * CELL, -y * CELL - CELL, CELL, CELL);
+        done++;
+        if (onProgress && (done & 65535) === 0) {
+          const now = performance.now();
+          if (now - lastYield > 100) {
+            lastYield = now;
+            onProgress(0.5 * done / totalCells, 'drawing grid');
+            await new Promise(r => setTimeout(r, 0));
+          }
+        }
       }
     }
   }
@@ -1896,11 +1933,21 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
     ctx.font = '5px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'top';
+    let done = 0;
+    const totalNumCells = Math.max(1, (maxCellX - minCellX + 1) * (maxCellY - minCellY + 1));
     for (let x = minCellX; x <= maxCellX; x++) {
       for (let y = minCellY; y <= maxCellY; y++) {
         const num = spiralIndexAt(x, y);
-        if (num === 0) continue;
-        ctx.fillText(num, x * CELL + CELL - 2, -y * CELL - CELL + 1.5);
+        if (num !== 0) ctx.fillText(num, x * CELL + CELL - 2, -y * CELL - CELL + 1.5);
+        done++;
+        if (onProgress && (done & 65535) === 0) {
+          const now = performance.now();
+          if (now - lastYield > 100) {
+            lastYield = now;
+            onProgress(0.95 + 0.05 * done / totalNumCells, 'numbers');
+            await new Promise(r => setTimeout(r, 0));
+          }
+        }
       }
     }
   }
@@ -1918,6 +1965,14 @@ function renderFrameToCanvas(ctx, canvasW, canvasH, view, placements, visibleCou
         ? '600 18px "Inter", system-ui, sans-serif'
         : '700 11px "JetBrains Mono", monospace';
       ctx.fillText(def.symbol, p.x * CELL + CELL / 2, -p.y * CELL - CELL / 2);
+      if (onProgress && (i & 65535) === 0) {
+        const now = performance.now();
+        if (now - lastYield > 100) {
+          lastYield = now;
+          onProgress(0.5 + 0.45 * i / Math.max(1, visibleCount), 'drawing pieces');
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
     }
   }
 

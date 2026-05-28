@@ -349,6 +349,17 @@ button { font: inherit; cursor: pointer; }
   display: block;
   touch-action: none;
   user-select: none;
+  /* When zoomed in past 1:1, snap cell rectangles to pixel boundaries instead
+     of antialiasing edges — gives a pixelated look (each world-cell is a solid
+     block of color) rather than a fuzzy one. Text (cell numbers + piece glyphs)
+     still uses text-rendering for legibility, so it stays smooth. */
+  shape-rendering: crispEdges;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+#board text {
+  /* override crispEdges for any text so glyphs and numbers stay readable */
+  shape-rendering: geometricPrecision;
 }
 
 .cell {
