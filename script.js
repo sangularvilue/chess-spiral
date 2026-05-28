@@ -112,58 +112,185 @@ let euclideanGeneratedFor = 0;
 let euclideanRingSize = null;
 
 function regenerateEuclideanSpiral() {
-  // Find R such that the lattice points in a disk of radius R cover the
-  // entire MAX_SPIRAL.
+  // Memory-efficient enumeration:
+  //   Iterate canonical (a, b) with 0 ≤ b ≤ a (upper-right wedge below the
+  //   diagonal). Each canonical contributes 1, 4, or 8 symmetric reps:
+  //     (0,0)        → 1 rep
+  //     (a,0), a>0   → 4 reps  (a,0)(0,a)(-a,0)(0,-a)
+  //     (a,a), a>0   → 4 reps  (a,a)(-a,a)(-a,-a)(a,-a)
+  //     general      → 8 reps  CCW order: (a,b)(b,a)(-b,a)(-a,b)(-a,-b)(-b,-a)(b,-a)(a,-b)
+  //   Because each rep group is already laid out in CCW angle order, we
+  //   never need a per-rep angle sort.
+  //
+  //   Then sort only the canonical array by d², which has ~N/8 elements,
+  //   not N. For 100M cells this cuts working-set memory from multi-GB to
+  //   a few hundred MB and avoids the V8 "Invalid array length" failures.
   let R = Math.ceil(Math.sqrt(MAX_SPIRAL / Math.PI)) + 4;
-  let xs, ys, d2s, count;
+  let cAs, cBs, cD2s, cCount;
   while (true) {
-    const cap = (2 * R + 1) * (2 * R + 1);
-    xs = new Int32Array(cap);
-    ys = new Int32Array(cap);
-    d2s = new Int32Array(cap);
-    count = 0;
+    const cap = ((R + 1) * (R + 2)) >>> 1; // canonical count upper bound
+    cAs  = new Int16Array(cap);
+    cBs  = new Int16Array(cap);
+    cD2s = new Int32Array(cap);
+    cCount = 0;
+    let cellTotal = 0;
     const R2 = R * R;
-    for (let a = -R; a <= R; a++) {
+    for (let a = 0; a <= R; a++) {
       const a2 = a * a;
-      const bMax = Math.floor(Math.sqrt(R2 - a2));
-      for (let b = -bMax; b <= bMax; b++) {
-        xs[count] = a; ys[count] = b; d2s[count] = a2 + b * b;
-        count++;
+      if (a2 > R2) break;
+      const bMax = Math.min(a, Math.floor(Math.sqrt(R2 - a2)));
+      for (let b = 0; b <= bMax; b++) {
+        cAs[cCount] = a;
+        cBs[cCount] = b;
+        cD2s[cCount] = a2 + b * b;
+        cCount++;
+        if (a === 0 && b === 0) cellTotal += 1;
+        else if (b === 0)       cellTotal += 4;
+        else if (a === b)       cellTotal += 4;
+        else                    cellTotal += 8;
       }
     }
-    if (count >= MAX_SPIRAL) break;
-    R += Math.max(1, Math.ceil(R * 0.1)); // bump and retry
+    if (cellTotal >= MAX_SPIRAL) break;
+    R += Math.max(1, Math.ceil(R * 0.1));
   }
 
-  // Pre-compute angles so the sort comparator stays cheap.
-  const angs = new Float64Array(count);
-  for (let i = 0; i < count; i++) {
-    let a = Math.atan2(ys[i], xs[i]);
-    if (a < 0) a += 2 * Math.PI;
-    angs[i] = a;
-  }
+  // Sort canonical indices by d². Int32Array.prototype.sort accepts a
+  // comparator in modern engines.
+  const cIdx = new Int32Array(cCount);
+  for (let i = 0; i < cCount; i++) cIdx[i] = i;
+  cIdx.sort((i, j) => cD2s[i] - cD2s[j]);
 
-  // Sort an index array by (d², angle).
-  const indices = new Array(count);
-  for (let i = 0; i < count; i++) indices[i] = i;
-  indices.sort((i, j) => {
-    const da = d2s[i] - d2s[j];
-    if (da !== 0) return da;
-    return angs[i] - angs[j];
-  });
-
-  // Clear LUT — old (ulam/diamond) entries are about to be overwritten.
   spiralIndexLUT.fill(0);
-
   euclideanRingSize = [];
-  for (let k = 0; k < MAX_SPIRAL; k++) {
-    const idx = indices[k];
-    const x = xs[idx], y = ys[idx];
-    spiralX[k] = x;
-    spiralY[k] = y;
-    spiralIndexLUT[(x + MAX_X) * LUT_SIDE + (y + MAX_X)] = k + 1;
-    const r = Math.floor(Math.sqrt(d2s[idx]));
-    euclideanRingSize[r] = (euclideanRingSize[r] || 0) + 1;
+
+  // Some d² values have several canonical representations (e.g. d²=25 has
+  // both (5,0) and (4,3)); within one d² group, all reps need to be
+  // emitted by angle CCW, *interleaving* between canonicals. Single-
+  // canonical groups (the common case) skip the sort and use the pre-
+  // CCW-ordered rep layout below.
+  //
+  // The buffer is sized for the worst-case group we expect to see at the
+  // ranges this app supports; bump it if you ever hit MAX_GROUP_REPS.
+  const MAX_GROUP_REPS = 256;
+  const grX  = new Int16Array(MAX_GROUP_REPS);
+  const grY  = new Int16Array(MAX_GROUP_REPS);
+  const grAng = new Float64Array(MAX_GROUP_REPS);
+  const grIdx = new Int32Array(MAX_GROUP_REPS);
+
+  function emitRepsCCW(a, b) {
+    // Writes 1/4/8 reps into grX/grY in CCW order. Returns count.
+    if (a === 0 && b === 0) { grX[0] = 0; grY[0] = 0; return 1; }
+    if (b === 0) {
+      grX[0] = a;  grY[0] = 0;
+      grX[1] = 0;  grY[1] = a;
+      grX[2] = -a; grY[2] = 0;
+      grX[3] = 0;  grY[3] = -a;
+      return 4;
+    }
+    if (a === b) {
+      grX[0] = a;  grY[0] = a;
+      grX[1] = -a; grY[1] = a;
+      grX[2] = -a; grY[2] = -a;
+      grX[3] = a;  grY[3] = -a;
+      return 4;
+    }
+    grX[0] = a;  grY[0] = b;
+    grX[1] = b;  grY[1] = a;
+    grX[2] = -b; grY[2] = a;
+    grX[3] = -a; grY[3] = b;
+    grX[4] = -a; grY[4] = -b;
+    grX[5] = -b; grY[5] = -a;
+    grX[6] = b;  grY[6] = -a;
+    grX[7] = a;  grY[7] = -b;
+    return 8;
+  }
+
+  let emitted = 0;
+  let k = 0;
+  while (k < cCount && emitted < MAX_SPIRAL) {
+    const d2 = cD2s[cIdx[k]];
+    // Find the extent of canonicals at this d².
+    let groupEnd = k + 1;
+    while (groupEnd < cCount && cD2s[cIdx[groupEnd]] === d2) groupEnd++;
+    const ring = Math.floor(Math.sqrt(d2));
+
+    if (groupEnd - k === 1) {
+      // Fast path: single canonical, reps already in CCW order.
+      const idx = cIdx[k];
+      const n = emitRepsCCW(cAs[idx], cBs[idx]);
+      for (let i = 0; i < n && emitted < MAX_SPIRAL; i++) {
+        const x = grX[i], y = grY[i];
+        spiralX[emitted] = x;
+        spiralY[emitted] = y;
+        spiralIndexLUT[(x + MAX_X) * LUT_SIDE + (y + MAX_X)] = emitted + 1;
+        euclideanRingSize[ring] = (euclideanRingSize[ring] || 0) + 1;
+        emitted++;
+      }
+    } else {
+      // Multi-canonical: gather all reps into the buffer, then angle-sort.
+      // Reuse grX/grY as the combined buffer.
+      let gc = 0;
+      for (let m = k; m < groupEnd; m++) {
+        const idx = cIdx[m];
+        const a = cAs[idx], b = cBs[idx];
+        // Inline the rep emission so we can append to grX/grY at position gc.
+        let nReps;
+        if (a === 0 && b === 0) {
+          grX[gc] = 0; grY[gc] = 0; nReps = 1;
+        } else if (b === 0) {
+          grX[gc] = a;  grY[gc] = 0;
+          grX[gc+1] = 0;  grY[gc+1] = a;
+          grX[gc+2] = -a; grY[gc+2] = 0;
+          grX[gc+3] = 0;  grY[gc+3] = -a;
+          nReps = 4;
+        } else if (a === b) {
+          grX[gc] = a;  grY[gc] = a;
+          grX[gc+1] = -a; grY[gc+1] = a;
+          grX[gc+2] = -a; grY[gc+2] = -a;
+          grX[gc+3] = a;  grY[gc+3] = -a;
+          nReps = 4;
+        } else {
+          grX[gc] = a;  grY[gc] = b;
+          grX[gc+1] = b;  grY[gc+1] = a;
+          grX[gc+2] = -b; grY[gc+2] = a;
+          grX[gc+3] = -a; grY[gc+3] = b;
+          grX[gc+4] = -a; grY[gc+4] = -b;
+          grX[gc+5] = -b; grY[gc+5] = -a;
+          grX[gc+6] = b;  grY[gc+6] = -a;
+          grX[gc+7] = a;  grY[gc+7] = -b;
+          nReps = 8;
+        }
+        gc += nReps;
+      }
+      // Compute angles and sort an index permutation. Insertion sort is fine
+      // since gc is small (≤ ~few dozen in practice).
+      for (let i = 0; i < gc; i++) {
+        let aa = Math.atan2(grY[i], grX[i]);
+        if (aa < 0) aa += 2 * Math.PI;
+        grAng[i] = aa;
+        grIdx[i] = i;
+      }
+      for (let i = 1; i < gc; i++) {
+        const key = grIdx[i];
+        const keyAng = grAng[key];
+        let j = i - 1;
+        while (j >= 0 && grAng[grIdx[j]] > keyAng) {
+          grIdx[j + 1] = grIdx[j];
+          j--;
+        }
+        grIdx[j + 1] = key;
+      }
+      for (let i = 0; i < gc && emitted < MAX_SPIRAL; i++) {
+        const ri = grIdx[i];
+        const x = grX[ri], y = grY[ri];
+        spiralX[emitted] = x;
+        spiralY[emitted] = y;
+        spiralIndexLUT[(x + MAX_X) * LUT_SIDE + (y + MAX_X)] = emitted + 1;
+        euclideanRingSize[ring] = (euclideanRingSize[ring] || 0) + 1;
+        emitted++;
+      }
+    }
+    k = groupEnd;
   }
   euclideanGeneratedFor = MAX_SPIRAL;
 }
