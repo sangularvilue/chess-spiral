@@ -5,11 +5,11 @@
 const fs = require('fs');
 const path = require('path');
 
-const stubElement = () => {
+const stubElement = (val) => {
   const el = {
     appendChild: () => el, addEventListener: () => {}, removeChild: () => {},
-    insertBefore: () => el, cloneNode: () => stubElement(),
-    firstChild: null, innerHTML: '', textContent: '', value: '30',
+    insertBefore: () => el, cloneNode: () => stubElement(val),
+    firstChild: null, innerHTML: '', textContent: '', value: val !== undefined ? val : '30',
     classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
     getBoundingClientRect: () => ({ width: 800, height: 600, left: 0, top: 0 }),
     setAttribute: () => {}, getAttribute: () => '0 0 100 100',
@@ -30,8 +30,16 @@ const stubElement = () => {
   return el;
 };
 
+// Return a stub that gives the dropdown selects valid default values, so the
+// script's init() doesn't fall into the "unknown spiral type" path.
+const SELECT_DEFAULTS = {
+  'rate-type': 'linear',
+  'display-mode': 'pieces',
+  'spiral-type': 'ulam',
+  'prerender-format': 'image',
+};
 global.document = {
-  getElementById: () => stubElement(),
+  getElementById: (id) => stubElement(SELECT_DEFAULTS[id]),
   createElement: () => stubElement(),
   createElementNS: () => stubElement(),
 };
